@@ -1,0 +1,51 @@
+#log
+log:
+  level: info
+
+# Kafka 配置
+kafka:
+  brokers: "kafka-node1:9592,kafka-node2:9792,kafka-node3:9992"
+  topic_trade: "web3_trade_events"
+  topic_data: "web3_data_events"
+  topic_sm: "web3_trade_sm_events"
+  topic_dev: "web3_token_dev_events"
+  group_id: "smart_consumer_dev"
+
+byd_rpc_url: http://byd-host:30032
+bsc_client_rawurl: http://8.216.34.252:64021
+solana_client_rawurl: https://jadeite-greasily-xykrmnpgkw-dedicated.helius-rpc.com?api-key=90e3661e-4c5f-4e6b-af81-7aed2fd0f5be
+
+# Redis 配置
+redis:
+  address: "r-3ns7cwzhnr26mqko6g.redis.rds.aliyuncs.com:6379"
+  password: "JCESX2B318mJa"
+  db: 3
+
+# PostgreSQL 配置
+postgres:
+  # dsn: "host=postgres-host user=test_pg01_rwuser01 password=E2#dN4c6d5Mz dbname=dex_db port=5432 sslmode=disable search_path=dex_query_v1"
+  dsn: "host=localhost user=postgres password=henrywork8812601 dbname=dex_db port=5432 sslmode=disable search_path=dex_query_v1"
+
+# SelectDB 配置
+selectdb:
+  # dsb: "test_selectdb_teemo:x$dKds7f%JqaK@tcp(selectdb-sg-o51479b4e02.selectdbfe.rds.aliyuncs.com:9030)/web3_trade?charset=utf8mb4&parseTime=True&loc=Local"
+  dsb: ""
+lark:
+  webhook: "https://open.larksuite.com/open-apis/bot/v2/hook/71e41f11-fc0d-423b-b838-af86c88ab123"
+
+# Elasticsearch 配置
+es:
+  base_url: "http://127.0.0.1:5005"
+  index: "web3_tokens"
+  username: "elastic"
+  password: "J4U#dh8Kd1Fz"
+
+# smart-money worker
+worker:
+  worker_num: 16
+
+# monitor
+monitor:
+  enable: true
+  prometheus_addr: "0.0.0.0:8091"
+
