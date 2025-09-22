@@ -37,6 +37,10 @@ func New(cfg config.Config, logger *zap.Logger) *Core {
 	analyzer.Cfg = cfg
 	scheduler.RegisterJob("smart_money_analyze", 10*time.Minute, analyzer.Run)
 
+	// 定時：錢包聰明錢分類（每 30 分鐘）
+	classifier := job.NewSmartWalletClassifier(repo, logger)
+	scheduler.RegisterJob("smart_wallet_classifier", 30*time.Minute, classifier.Run)
+
 	// 定時：清理 30 天前舊交易（每天）
 	cleanup := job.NewCleanupJob(repo, logger)
 	scheduler.RegisterJob("cleanup_old_transactions", 24*time.Hour, cleanup.Run)

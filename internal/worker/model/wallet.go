@@ -1,21 +1,83 @@
 package model
 
-import "time"
+import (
+	"database/sql/driver"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// StringArray 自定義類型用於處理 PostgreSQL 陣列
+type StringArray []string
+
+// Scan 實現 sql.Scanner 接口
+func (a *StringArray) Scan(value interface{}) error {
+	if value == nil {
+		*a = StringArray{}
+		return nil
+	}
+
+	switch v := value.(type) {
+	case string:
+		// 處理 PostgreSQL 陣列格式，如 "{smart}" 或 "{\"smart money\"}"
+		if v == "{}" {
+			*a = StringArray{}
+			return nil
+		}
+		// 移除大括號並分割
+		cleaned := strings.Trim(v, "{}")
+		if cleaned == "" {
+			*a = StringArray{}
+			return nil
+		}
+		parts := strings.Split(cleaned, ",")
+		res := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			// 去除包裹引號
+			if len(p) >= 2 && strings.HasPrefix(p, "\"") && strings.HasSuffix(p, "\"") {
+				p = strings.Trim(p, "\"")
+				p = strings.ReplaceAll(p, "\\\"", "\"")
+			}
+			res = append(res, p)
+		}
+		*a = StringArray(res)
+		return nil
+	case []byte:
+		return a.Scan(string(v))
+	default:
+		return fmt.Errorf("cannot scan %T into StringArray", value)
+	}
+}
+
+// Value 實現 driver.Valuer 接口
+func (a StringArray) Value() (driver.Value, error) {
+	if len(a) == 0 {
+		return "{}", nil
+	}
+	quoted := make([]string, 0, len(a))
+	for _, s := range a {
+		// 轉義雙引號並加上引號，確保包含空格或特殊字元的元素可被正確解析
+		esc := strings.ReplaceAll(s, "\"", "\\\"")
+		quoted = append(quoted, "\""+esc+"\"")
+	}
+	return "{" + strings.Join(quoted, ",") + "}", nil
+}
 
 // WalletSummary 钱包摘要信息
 type WalletSummary struct {
-	ID              int      `gorm:"primaryKey" json:"id"`
-	WalletAddress   string   `gorm:"column:wallet_address;type:varchar(512);not null;uniqueIndex" json:"wallet_address"`
-	Avatar          string   `gorm:"column:avatar;type:varchar(512);not null" json:"avatar"` // 头像
-	Balance         float64  `gorm:"column:balance;type:decimal(20,8)" json:"balance"`
-	BalanceUSD      float64  `gorm:"column:balance_usd;type:decimal(20,8)" json:"balance_usd"`
-	ChainID         uint64   `gorm:"column:chain_id;type:int" json:"chain_id"`
-	Tags            []string `gorm:"column:tags;type:varchar(50)[]" json:"tags"` // smart money
-	TwitterName     string   `gorm:"column:twitter_name;type:varchar(50)" json:"twitter_name"`
-	TwitterUsername string   `gorm:"column:twitter_username;type:varchar(50)" json:"twitter_username"`
-	WalletType      int      `gorm:"column:wallet_type;type:int;default:0" json:"wallet_type"`       // 0:一般聪明钱，1:pump聪明钱，2:moonshot聪明钱
-	AssetMultiple   float64  `gorm:"column:asset_multiple;type:decimal(10,1)" json:"asset_multiple"` // 盈亏资产倍数
-	TokenList       string   `gorm:"column:token_list;type:varchar(512)" json:"token_list"`          // 最近交易过的token(3个)
+	ID              int         `gorm:"primaryKey" json:"id"`
+	WalletAddress   string      `gorm:"column:wallet_address;type:varchar(512);not null;uniqueIndex" json:"wallet_address"`
+	Avatar          string      `gorm:"column:avatar;type:varchar(512);not null" json:"avatar"` // 头像
+	Balance         float64     `gorm:"column:balance;type:decimal(20,8)" json:"balance"`
+	BalanceUSD      float64     `gorm:"column:balance_usd;type:decimal(20,8)" json:"balance_usd"`
+	ChainID         uint64      `gorm:"column:chain_id;type:int" json:"chain_id"`
+	Tags            StringArray `gorm:"column:tags;type:varchar(50)[]" json:"tags"` // smart money
+	TwitterName     string      `gorm:"column:twitter_name;type:varchar(50)" json:"twitter_name"`
+	TwitterUsername string      `gorm:"column:twitter_username;type:varchar(50)" json:"twitter_username"`
+	WalletType      int         `gorm:"column:wallet_type;type:int;default:0" json:"wallet_type"`       // 0:一般聪明钱，1:pump聪明钱，2:moonshot聪明钱
+	AssetMultiple   float64     `gorm:"column:asset_multiple;type:decimal(10,1)" json:"asset_multiple"` // 盈亏资产倍数
+	TokenList       string      `gorm:"column:token_list;type:varchar(512)" json:"token_list"`          // 最近交易过的token(3个)
 
 	// 交易数据 - 30天
 	AvgCost30d             float64 `gorm:"column:avg_cost_30d;type:decimal(20,8)" json:"avg_cost_30d"`
@@ -84,12 +146,11 @@ type WalletSummary struct {
 	DistributionN50to0Percentage7d   float64 `gorm:"column:distribution_n50to0_percentage_7d;type:decimal(5,4)" json:"distribution_n50to0_percentage_7d"`
 	DistributionLt50Percentage7d     float64 `gorm:"column:distribution_lt50_percentage_7d;type:decimal(5,4)" json:"distribution_lt50_percentage_7d"`
 
-	// 时间和状态
-	LastTransactionTime int64 `gorm:"column:last_transaction_time" json:"last_transaction_time"` // blocktime
-	IsActive            bool  `gorm:"column:is_active;type:boolean" json:"is_active"`
-
-	UpdatedAt time.Time `gorm:"column:updated_at;type:timestamp;not null;default:CURRENT_TIMESTAMP" json:"updated_at"`
-	CreatedAt time.Time `gorm:"column:created_at;type:timestamp;not null;default:CURRENT_TIMESTAMP" json:"created_at"`
+	// 其他字段
+	LastTransactionTime int64     `gorm:"column:last_transaction_time" json:"last_transaction_time"` // 最近一次交易时间（blocktime）
+	IsActive            bool      `gorm:"column:is_active;type:boolean" json:"is_active"`            // 是否活跃/聪明钱
+	UpdatedAt           time.Time `gorm:"column:updated_at;type:timestamp;not null;default:CURRENT_TIMESTAMP" json:"updated_at"`
+	CreatedAt           time.Time `gorm:"column:created_at;type:timestamp;not null;default:CURRENT_TIMESTAMP" json:"created_at"`
 }
 
 func (w *WalletSummary) TableName() string {

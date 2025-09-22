@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -213,7 +214,8 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 				}
 			}
 		}
-		s30.winRate = float64(wins) / float64(s30.sellNum) * 100
+		// 改為比例 0-1，避免寫入 DECIMAL(5,4) 溢出
+		s30.winRate = float64(wins) / float64(s30.sellNum)
 	}
 	if s7.sellNum > 0 {
 		var wins int
@@ -225,7 +227,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 				}
 			}
 		}
-		s7.winRate = float64(wins) / float64(s7.sellNum) * 100
+		s7.winRate = float64(wins) / float64(s7.sellNum)
 	}
 	if s1.sellNum > 0 {
 		var wins int
@@ -237,7 +239,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 				}
 			}
 		}
-		s1.winRate = float64(wins) / float64(s1.sellNum) * 100
+		s1.winRate = float64(wins) / float64(s1.sellNum)
 	}
 
 	// 平均成本
@@ -253,13 +255,13 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 
 	// PNL 百分比（以期間買入總成本為分母）
 	if s30.totalCost > 0 {
-		s30.pnlPct = s30.pnl / s30.totalCost * 100
+		s30.pnlPct = clampPercentage((s30.pnl / s30.totalCost) * 100)
 	}
 	if s7.totalCost > 0 {
-		s7.pnlPct = s7.pnl / s7.totalCost * 100
+		s7.pnlPct = clampPercentage((s7.pnl / s7.totalCost) * 100)
 	}
 	if s1.totalCost > 0 {
-		s1.pnlPct = s1.pnl / s1.totalCost * 100
+		s1.pnlPct = clampPercentage((s1.pnl / s1.totalCost) * 100)
 	}
 
 	// 以當前幣價計算未實現盈虧（仍依時間窗切分）。價格透過 ES 查詢，並在單錢包內做簡單快取
@@ -309,6 +311,73 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 	unreal7d := calcUnrealized(ts7d, tsNow)
 	unreal30d := calcUnrealized(ts30d, tsNow)
 
+	// 分布統計：按 token 聚合成本與實現損益，計算每個 token 的 pnl% 並分桶（百分比單位）
+	type distRes struct {
+		gt500           int
+		between200to500 int
+		between0to200   int
+		n50to0          int
+		lt50            int
+		pGt500          float64
+		p200to500       float64
+		p0to200         float64
+		pN50to0         float64
+		pLt50           float64
+	}
+	computeDist := func(startTs, endTs int64) distRes {
+		type agg struct{ cost, pnl float64 }
+		tokens := map[string]*agg{}
+		for _, t := range txs {
+			if t.TransactionTime < startTs || t.TransactionTime > endTs {
+				continue
+			}
+			txType := strings.ToLower(t.TransactionType)
+			if txType == "buy" || txType == "build" {
+				if tokens[t.TokenAddress] == nil {
+					tokens[t.TokenAddress] = &agg{}
+				}
+				tokens[t.TokenAddress].cost += t.Value
+			} else if txType == "sell" || txType == "clean" {
+				if tokens[t.TokenAddress] == nil {
+					tokens[t.TokenAddress] = &agg{}
+				}
+				tokens[t.TokenAddress].pnl += t.RealizedProfit
+			}
+		}
+		var res distRes
+		total := 0
+		for _, a := range tokens {
+			if a.cost <= 0 {
+				continue
+			}
+			total++
+			pnlPct := (a.pnl / a.cost) * 100
+			if pnlPct > 500 {
+				res.gt500++
+			} else if pnlPct >= 200 && pnlPct <= 500 {
+				res.between200to500++
+			} else if pnlPct >= 0 && pnlPct < 200 {
+				res.between0to200++
+			} else if pnlPct >= -50 && pnlPct < 0 {
+				res.n50to0++
+			} else if pnlPct < -50 {
+				res.lt50++
+			}
+		}
+		if total > 0 {
+			fTotal := float64(total)
+			res.pGt500 = float64(res.gt500) / fTotal
+			res.p200to500 = float64(res.between200to500) / fTotal
+			res.p0to200 = float64(res.between0to200) / fTotal
+			res.pN50to0 = float64(res.n50to0) / fTotal
+			res.pLt50 = float64(res.lt50) / fTotal
+		}
+		return res
+	}
+
+	d30 := computeDist(ts30d, tsNow)
+	d7 := computeDist(ts7d, tsNow)
+
 	// 產出 30 天日線 PNL 字串（從昨天往回 30 天）
 	pnlPic30d := buildPNLPic30(dailyPNL, now)
 
@@ -317,7 +386,25 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 	tokenList := strings.Join(recent, ",")
 
 	// 是否視為活躍/聰明錢（與 python 規則一致）
-	isSmart := s30.pnl > 0 && s30.winRate > 30 && s30.winRate != 100 && s30.totalTx < 2000 && lastTxTime >= ts30d
+	isSmart := s30.pnl > 0 && s30.winRate > 0.3 && s30.winRate != 1 && s30.totalTx < 2000 && lastTxTime >= ts30d
+
+	// j.logger.Info("is_active decision",
+	// 	zap.String("wallet", w.WalletAddress),
+	// 	zap.Float64("pnl_30d", s30.pnl),
+	// 	zap.Float64("pnl_pct_30d", s30.pnlPct),
+	// 	zap.Int("total_tx_30d", s30.totalTx),
+	// 	zap.Int("buy_num_30d", s30.buyNum),
+	// 	zap.Int("sell_num_30d", s30.sellNum),
+	// 	zap.Float64("win_rate_30d", s30.winRate),
+	// 	zap.Int64("last_tx_time", lastTxTime),
+	// 	zap.Int64("ts30d", ts30d),
+	// 	zap.Bool("cond_pnl_gt0", s30.pnl > 0),
+	// 	zap.Bool("cond_winrate_gt_0_3", s30.winRate > 0.3),
+	// 	zap.Bool("cond_winrate_not_1", s30.winRate != 1),
+	// 	zap.Bool("cond_total_tx_lt_2000", s30.totalTx < 2000),
+	// 	zap.Bool("cond_last_tx_in_30d", lastTxTime >= ts30d),
+	// 	zap.Bool("is_active", isSmart),
+	// )
 
 	// 僅在「近30天有交易」時才寫入統計類欄位；避免把原本有值的欄位覆蓋為 0
 	if len(txs) > 0 {
@@ -349,6 +436,30 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 		updates["unrealized_profit_7d"] = unreal7d
 		updates["total_cost_7d"] = s7.totalCost
 		updates["avg_realized_profit_7d"] = avgRealized(s7.pnl, s7.sellNum)
+
+		// 分布統計 - 30d（比例以 0-100 儲存）
+		updates["distribution_gt500_30d"] = d30.gt500
+		updates["distribution_200to500_30d"] = d30.between200to500
+		updates["distribution_0to200_30d"] = d30.between0to200
+		updates["distribution_n50to0_30d"] = d30.n50to0
+		updates["distribution_lt50_30d"] = d30.lt50
+		updates["distribution_gt500_percentage_30d"] = d30.pGt500 * 100
+		updates["distribution_200to500_percentage_30d"] = d30.p200to500 * 100
+		updates["distribution_0to200_percentage_30d"] = d30.p0to200 * 100
+		updates["distribution_n50to0_percentage_30d"] = d30.pN50to0 * 100
+		updates["distribution_lt50_percentage_30d"] = d30.pLt50 * 100
+
+		// 分布統計 - 7d（比例以 0-100 儲存）
+		updates["distribution_gt500_7d"] = d7.gt500
+		updates["distribution_200to500_7d"] = d7.between200to500
+		updates["distribution_0to200_7d"] = d7.between0to200
+		updates["distribution_n50to0_7d"] = d7.n50to0
+		updates["distribution_lt50_7d"] = d7.lt50
+		updates["distribution_gt500_percentage_7d"] = d7.pGt500 * 100
+		updates["distribution_200to500_percentage_7d"] = d7.p200to500 * 100
+		updates["distribution_0to200_percentage_7d"] = d7.p0to200 * 100
+		updates["distribution_n50to0_percentage_7d"] = d7.pN50to0 * 100
+		updates["distribution_lt50_percentage_7d"] = d7.pLt50 * 100
 
 		// 1d
 		updates["avg_cost_1d"] = s1.avgCost
@@ -409,6 +520,22 @@ func avgRealized(pnl float64, sellNum int) float64 {
 func pctToMultiple(pct float64) float64 {
 	// (pnl_percentage_30d / 100) + 1
 	return pct/100 + 1
+}
+
+// 將百分比值裁剪在資料庫欄位 DECIMAL(8,4) 可容納的範圍內
+func clampPercentage(value float64) float64 {
+	const max = 9999.9999
+	const min = -9999.9999
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0
+	}
+	if value > max {
+		return max
+	}
+	if value < min {
+		return min
+	}
+	return value
 }
 
 func buildPNLPic30(daily map[string]float64, now time.Time) string {
