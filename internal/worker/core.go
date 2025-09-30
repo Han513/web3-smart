@@ -32,14 +32,10 @@ func New(cfg config.Config, logger *zap.Logger) *Core {
 	cacheLoad := job.NewCacheLoad(cfg, repo, logger)
 	scheduler.RegisterOnceJob("cache_load", cacheLoad.Run)
 
-	// 定時：聰明錢資料聚合更新（每 10 分鐘）
+	// 定時：聰明錢資料聚合更新（每 2 小時）
 	analyzer := job.NewSmartMoneyAnalyzer(repo, logger)
 	analyzer.Cfg = cfg
-	scheduler.RegisterJob("smart_money_analyze", 10*time.Minute, analyzer.Run)
-
-	// 定時：錢包聰明錢分類（每 30 分鐘）
-	classifier := job.NewSmartWalletClassifier(repo, logger)
-	scheduler.RegisterJob("smart_wallet_classifier", 30*time.Minute, classifier.Run)
+	scheduler.RegisterJob("smart_money_analyze", 2*time.Hour, analyzer.Run)
 
 	// 定時：清理 30 天前舊交易（每天）
 	cleanup := job.NewCleanupJob(repo, logger)

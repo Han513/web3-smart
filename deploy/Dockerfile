@@ -1,0 +1,66 @@
+# ---------- Producer 构建阶段即编译golang程序 ----------
+FROM golang:1.24.3 AS builder
+WORKDIR /app
+
+
+# 复制依赖文件并整理依赖
+COPY go.mod go.sum ./
+
+# 这行是引用当前机器git相关配置，及下载go mod
+RUN --mount=type=bind,src=deploy/.git-credentials,dst=/root/.git-credentials \
+    git config --global credential.helper store && go mod download -x
+
+# 复制全部代码
+COPY . .
+
+# 进入 worker 目录并构建二进制文件
+WORKDIR /app
+RUN CGO_ENABLED=0 go build -o app cmd/worker/main.go
+RUN CGO_ENABLED=0 go build -o prepare_cache cmd/script/main.go
+
+
+
+
+
+# ---------- Producer 运行阶段及部署运行程序 ----------
+FROM ubuntu:22.04 AS runner
+
+# 设置 DEBIAN_FRONTEND 防止 tzdata 交互
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 更新 apt 源并安装 tzdata 设置加载为中国本地时间
+RUN apt-get update && \
+    apt-get install -y ca-certificates && \
+    sed -i 's@//archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list && \
+    sed -i 's@//security.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get install -y tzdata && \
+    ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    dpkg-reconfigure --frontend noninteractive tzdata && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /root
+COPY --from=builder /app/app /root/
+CMD ["/root/app"]
+
+
+# ---------- Producer 运行阶段及部署运行程序 ----------
+FROM ubuntu:22.04 AS prepare_runner
+
+# 设置 DEBIAN_FRONTEND 防止 tzdata 交互
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 更新 apt 源并安装 tzdata 设置加载为中国本地时间
+RUN apt-get update && \
+    apt-get install -y ca-certificates && \
+    sed -i 's@//archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list && \
+    sed -i 's@//security.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get install -y tzdata && \
+    ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    dpkg-reconfigure --frontend noninteractive tzdata && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /root
+COPY --from=builder /app/prepare_cache /root/
+CMD ["/root/prepare_cache"]

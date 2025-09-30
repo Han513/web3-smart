@@ -6,7 +6,10 @@ import (
 	"sync"
 	"time"
 	"web3-smart/internal/worker/config"
+	"web3-smart/internal/worker/dao"
+	"web3-smart/internal/worker/model"
 	"web3-smart/pkg/database"
+	"web3-smart/pkg/elasticsearch"
 	"web3-smart/pkg/evm_client"
 	"web3-smart/pkg/solana_client"
 
@@ -14,6 +17,8 @@ import (
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
+	bydrpc "gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker/byd_rpc"
+	layeredcahe "gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker/layered_cahe"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -37,11 +42,14 @@ type repositoryImpl struct {
 	logger       *zap.Logger
 	db           *gorm.DB
 	selectDB     *gorm.DB
+	esClient     *elasticsearch.Client
 	mainRdb      *redis.Client
 	metricsRdb   *redis.Client
 	mq           *kafka.Writer
 	solanaClient *rpc.Client
 	bscClient    *ethclient.Client
+	bydRpc       *bydrpc.BydRpcClient
+	daoManager   *dao.DAOManager
 }
 
 func (r *repositoryImpl) init() {
@@ -52,15 +60,26 @@ func (r *repositoryImpl) init() {
 		panic(err)
 	}
 
-	// 初始化selectDB（可选，DSN 为空则跳过）
-	if strings.TrimSpace(r.cfg.SelectDB.DSN) != "" {
-		r.selectDB, err = database.InitSelectDB(r.cfg.SelectDB.DSN)
-		if err != nil {
-			r.logger.Warn("failed to connect to selectdb, continue without it", zap.Error(err))
-		}
-	} else {
-		r.logger.Info("selectdb dsn empty, skip selectdb initialization")
+	// 初始化selectDB
+	//r.selectDB, err = database.InitSelectDB(r.cfg.SelectDB.DSN)
+	//if err != nil {
+	//	panic(err)
+	//}
+
+	// 初始化 Elasticsearch Client
+	esClient, err := elasticsearch.NewClient(elasticsearch.Config{
+		Addresses: r.cfg.Elasticsearch.Addresses,
+		Username:  r.cfg.Elasticsearch.Username,
+		Password:  r.cfg.Elasticsearch.Password,
+		Indexs: map[string]map[string]interface{}{
+			r.cfg.Elasticsearch.HoldingsIndexName: (*model.WalletHolding)(nil).ToESIndex(),
+			r.cfg.Elasticsearch.WalletsIndexName:  (*model.WalletSummary)(nil).ToESIndex(),
+		},
+	}, r.logger)
+	if err != nil {
+		panic(err)
 	}
+	r.esClient = esClient
 
 	// 初始化 Main RDB
 	r.mainRdb = redis.NewClient(&redis.Options{
@@ -71,7 +90,7 @@ func (r *repositoryImpl) init() {
 	})
 
 	if err := r.mainRdb.Ping(context.Background()).Err(); err != nil {
-		r.logger.Warn("failed to connect to redis, continue", zap.Error(err))
+		panic("failed to connect to redis: " + err.Error())
 	}
 
 	// 初始化 Metrics RDB
@@ -82,17 +101,31 @@ func (r *repositoryImpl) init() {
 	})
 
 	if err := r.metricsRdb.Ping(context.Background()).Err(); err != nil {
-		r.logger.Warn("failed to connect to metrics redis, continue", zap.Error(err))
+		panic("failed to connect to redis: " + err.Error())
 	}
+
+	// 初始化 Byd Rpc
+	priceRdb := redis.NewClient(&redis.Options{
+		Addr:     r.cfg.Redis.Address,
+		Password: r.cfg.Redis.Password,
+		DB:       r.cfg.Redis.DBPrice,
+	})
+
+	if err := priceRdb.Ping(context.Background()).Err(); err != nil {
+		panic("failed to connect to redis: " + err.Error())
+	}
+
+	priceCache := layeredcahe.NewWithRedisClient(priceRdb, 30*time.Second, 30*time.Second)
+	r.bydRpc = bydrpc.NewBydRpcClient(r.cfg.BydRpcUrl, 30*time.Second, priceCache)
 
 	brokers := strings.Split(r.cfg.Kafka.Brokers, ",")
 	r.mq = &kafka.Writer{
 		Addr:         kafka.TCP(brokers...),
-		Balancer:     &kafka.LeastBytes{},
+		Balancer:     &kafka.Hash{},
 		BatchSize:    1000,
 		BatchBytes:   1024 * 1024, // 1MB
 		Async:        true,
-		RequiredAcks: kafka.RequireNone,
+		RequiredAcks: kafka.RequireOne,
 		Compression:  kafka.Snappy,
 		// 添加连接控制
 		MaxAttempts:  5,
@@ -102,6 +135,9 @@ func (r *repositoryImpl) init() {
 	// 初始化rpc client
 	r.bscClient = evm_client.Init(r.cfg.BscClientRawUrl)
 	r.solanaClient = solana_client.Init(r.cfg.SolanaClientRawUrl)
+
+	// 初始化 DAO Manager
+	r.daoManager = dao.NewDAOManager(r.db, r.mainRdb)
 }
 
 func (r *repositoryImpl) GetMainRDB() *redis.Client {
@@ -120,6 +156,10 @@ func (r *repositoryImpl) GetSelectDB() *gorm.DB {
 	return r.selectDB
 }
 
+func (r *repositoryImpl) GetElasticsearchClient() *elasticsearch.Client {
+	return r.esClient
+}
+
 func (r *repositoryImpl) GetMQ() MQClient {
 	return r.mq
 }
@@ -130,6 +170,14 @@ func (r *repositoryImpl) GetSolanaClient() *rpc.Client {
 
 func (r *repositoryImpl) GetBscClient() *ethclient.Client {
 	return r.bscClient
+}
+
+func (r *repositoryImpl) GetBydRpc() *bydrpc.BydRpcClient {
+	return r.bydRpc
+}
+
+func (r *repositoryImpl) GetDAOManager() *dao.DAOManager {
+	return r.daoManager
 }
 
 func (r *repositoryImpl) Close() error {
@@ -149,6 +197,12 @@ func (r *repositoryImpl) Close() error {
 	}
 	if r.mq != nil {
 		r.mq.Close()
+	}
+	if r.bscClient != nil {
+		r.bscClient.Close()
+	}
+	if r.solanaClient != nil {
+		r.solanaClient.Close()
 	}
 	return nil
 }

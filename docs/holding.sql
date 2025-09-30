@@ -28,7 +28,7 @@ CREATE TABLE dex_query_v1.t_smart_holding (
   updated_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id, chain_id, wallet_address),
-  UNIQUE (wallet_address, token_address, chain_id, is_dev)
+  UNIQUE (wallet_address, token_address, chain_id)
 ) PARTITION BY LIST (chain_id);
 
 -- 为 chain_id = 501 创建一级分区

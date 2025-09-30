@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+
+  web3_smart:
+
+    restart: always
+
+    build:
+
+      context: .
+
+      dockerfile: deploy/Dockerfile
+
+      target: runner
+
+    image: web3_smart
+
+    container_name: web3_smart
+
+    ports:
+      - "8091:8091"
+
+    volumes:
+
+      - ./config/config.worker.yaml:/root/config/config.worker.yaml
+
+      - ./logs:/root/logs
+
+      - /etc/hosts:/etc/hosts
+
+  web3_smart_prepare:
+    restart: "no"
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: prepare_runner
+    image: web3_smart_prepare
+    container_name: web3_smart_prepare
+    volumes:
+      - ./config/config.worker.yaml:/root/config/config.worker.yaml
+      - ./logs:/root/logs
+      - /etc/hosts:/etc/hosts

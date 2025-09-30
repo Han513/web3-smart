@@ -1,20 +1,17 @@
 package job
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
-	"net/http"
 	"strings"
 	"time"
 
 	"web3-smart/internal/worker/config"
 	"web3-smart/internal/worker/model"
 	"web3-smart/internal/worker/repository"
-
-	"io"
+	"web3-smart/internal/worker/writer"
+	walletwriter "web3-smart/internal/worker/writer/wallet"
 
 	"github.com/gagliardetto/solana-go"
 	rpcsol "github.com/gagliardetto/solana-go/rpc"
@@ -43,6 +40,15 @@ func (j *SmartMoneyAnalyzer) Run(ctx context.Context) error {
 		return fmt.Errorf("db is nil")
 	}
 
+	// 初始化 ES 異步批量寫入器（若 ES 可用）
+	var esAsync *writer.AsyncBatchWriter[model.WalletSummary]
+	if esClient := j.repo.GetElasticsearchClient(); esClient != nil && j.Cfg.Elasticsearch.WalletsIndexName != "" {
+		esWriter := walletwriter.NewESWalletWriter(esClient, j.logger, j.Cfg.Elasticsearch.WalletsIndexName)
+		esAsync = writer.NewAsyncBatchWriter[model.WalletSummary](j.logger, esWriter, 1000, 300*time.Millisecond, "wallet_es_writer", 3)
+		esAsync.Start(ctx)
+		defer esAsync.Close()
+	}
+
 	// 取出所有錢包（限制每批處理數量，避免一次載入過大）
 	const pageSize = 500
 	var page int64 = 0
@@ -68,8 +74,10 @@ func (j *SmartMoneyAnalyzer) Run(ctx context.Context) error {
 
 		for _, w := range wallets {
 			// 可選：只處理近 30 天有交易的錢包，減少計算
-			if err := j.updateOneWallet(ctx, db, &w); err != nil {
+			if esDoc, err := j.updateOneWallet(ctx, db, &w); err != nil {
 				j.logger.Error("update wallet failed", zap.String("wallet", w.WalletAddress), zap.Error(err))
+			} else if esAsync != nil && esDoc != nil {
+				esAsync.Submit(*esDoc)
 			}
 			processed++
 			if processed%200 == 0 {
@@ -87,9 +95,45 @@ func (j *SmartMoneyAnalyzer) Run(ctx context.Context) error {
 	return nil
 }
 
-func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w *model.WalletSummary) error {
+// getTokenPriceUSD 透過已初始化的 ES Client 查詢 token 價格（走 SDK，避免手寫 HTTP 與額外 config 差異）
+func (j *SmartMoneyAnalyzer) getTokenPriceUSD(ctx context.Context, tokenAddress string) (float64, error) {
+	es := j.repo.GetElasticsearchClient()
+	if es == nil {
+		return 0, fmt.Errorf("es client not initialized")
+	}
+	// 盡量使用 routing=tokenAddress，並兼容多欄位匹配
+	query := map[string]any{
+		"size": 1,
+		"query": map[string]any{
+			"bool": map[string]any{
+				"should": []any{
+					map[string]any{"term": map[string]any{"address.keyword": tokenAddress}},
+					map[string]any{"term": map[string]any{"address": tokenAddress}},
+					map[string]any{"term": map[string]any{"address_normalized": tokenAddress}},
+				},
+				"minimum_should_match": 1,
+			},
+		},
+		"_source": []string{"price_usd"},
+	}
+	index := "web3_tokens"
+	res, err := es.SearchWithRouting(ctx, index, tokenAddress, query)
+	if err != nil {
+		return 0, err
+	}
+	if len(res.Hits.Hits) == 0 {
+		return 0, fmt.Errorf("price not found")
+	}
+	src := res.Hits.Hits[0].Source
+	if v, ok := src["price_usd"].(float64); ok {
+		return v, nil
+	}
+	return 0, fmt.Errorf("price_usd not found")
+}
+
+func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w *model.WalletSummary) (*model.WalletSummary, error) {
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
 	// 時間邊界
 	now := time.Now()
@@ -104,7 +148,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 		Where("wallet_address = ? AND chain_id = ? AND transaction_time >= ?", w.WalletAddress, w.ChainID, ts30d).
 		Order("transaction_time ASC").
 		Find(&txs).Error; err != nil {
-		return err
+		return nil, err
 	}
 
 	// 構建更新欄位，先放置「一定要更新」的欄位，例如餘額
@@ -270,7 +314,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 		if v, ok := tokenPriceCache[token]; ok {
 			return v
 		}
-		p, err := getTokenPriceUSDWithCfg(ctx, j.Cfg, token)
+		p, err := j.getTokenPriceUSD(ctx, token)
 		if err != nil {
 			j.logger.Warn("es price fetch failed", zap.String("token", token), zap.Error(err))
 			return 0
@@ -408,6 +452,21 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 
 	// 僅在「近30天有交易」時才寫入統計類欄位；避免把原本有值的欄位覆蓋為 0
 	if len(txs) > 0 {
+		// 計算五條件判斷結果（基於本次統計數據）
+		winRatePct := s30.winRate * 100
+		condWinRate := winRatePct > 60
+		condTx7d := s7.totalTx > 100
+		condPNL30d := s30.pnl > 1000
+		condPNLPct := s30.pnlPct > 100
+		condDist := (d30.pLt50 * 100) < 30
+		passedClassifier := condWinRate && condTx7d && condPNL30d && condPNLPct && condDist
+
+		// 若當前 tags 不包含 smart money，且通過五條件，追加標籤
+		if !hasSmartMoneyTag(w.Tags) && passedClassifier {
+			newTags := append([]string{}, w.Tags...)
+			newTags = append(newTags, "smart money")
+			updates["tags"] = newTags
+		}
 		updates["token_list"] = tokenList
 		updates["asset_multiple"] = pctToMultiple(s30.pnlPct)
 		updates["last_transaction_time"] = lastTxTime
@@ -473,8 +532,12 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 		updates["total_cost_1d"] = s1.totalCost
 		updates["avg_realized_profit_1d"] = avgRealized(s1.pnl, s1.sellNum)
 
-		// 狀態
-		updates["is_active"] = isSmart
+		// 狀態：若已有 smart money 標籤但本次未通過五條件，強制 false
+		isActive := isSmart
+		if hasSmartMoneyTag(w.Tags) && !passedClassifier {
+			isActive = false
+		}
+		updates["is_active"] = isActive
 	}
 
 	// 計算 balance_usd：balance 為 0 → 直接 0；否則使用 ES 的 SOL 價格換算
@@ -490,7 +553,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 		if bal == 0 {
 			updates["balance_usd"] = 0.0
 		} else if w.ChainID == 501 {
-			if price, err := getTokenPriceUSDWithCfg(ctx, j.Cfg, "So11111111111111111111111111111111111111112"); err == nil {
+			if price, err := j.getTokenPriceUSD(ctx, "So11111111111111111111111111111111111111112"); err == nil {
 				updates["balance_usd"] = bal * price
 			} else {
 				j.logger.Warn("es price for SOL failed", zap.Error(err))
@@ -504,10 +567,123 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 	if err := db.WithContext(ctx).Model(&model.WalletSummary{}).
 		Where("wallet_address = ?", w.WalletAddress).
 		Updates(updates).Error; err != nil {
-		return err
+		return nil, err
 	}
 
-	return nil
+	// 構建 ES 文檔對應的 WalletSummary（儘量以本次計算值為準）
+	es := &model.WalletSummary{
+		WalletAddress:   w.WalletAddress,
+		Avatar:          w.Avatar,
+		ChainID:         w.ChainID,
+		TwitterName:     w.TwitterName,
+		TwitterUsername: w.TwitterUsername,
+		WalletType:      w.WalletType,
+		CreatedAt:       w.CreatedAt,
+	}
+
+	// 平衡：若本次拿到餘額則用新值，否則沿用舊值
+	if v, ok := updates["balance"]; ok {
+		if f, ok2 := v.(float64); ok2 {
+			es.Balance = f
+		}
+	} else {
+		es.Balance = w.Balance
+	}
+	if v, ok := updates["balance_usd"]; ok {
+		if f, ok2 := v.(float64); ok2 {
+			es.BalanceUSD = f
+		}
+	} else {
+		es.BalanceUSD = w.BalanceUSD
+	}
+
+	// 標籤
+	if v, ok := updates["tags"]; ok {
+		if arr, ok2 := v.([]string); ok2 {
+			es.Tags = arr
+		} else {
+			es.Tags = w.Tags
+		}
+	} else {
+		es.Tags = w.Tags
+	}
+
+	// 指標 - 僅在本次有聚合時更新，否則保留原值
+	if len(txs) > 0 {
+		es.TokenList = tokenList
+		es.AssetMultiple = pctToMultiple(s30.pnlPct)
+		es.LastTransactionTime = lastTxTime
+
+		es.AvgCost30d = s30.avgCost
+		es.BuyNum30d = s30.buyNum
+		es.SellNum30d = s30.sellNum
+		es.WinRate30d = s30.winRate
+		es.PNL30d = s30.pnl
+		es.PNLPercentage30d = s30.pnlPct
+		es.PNLPic30d = pnlPic30d
+		es.UnrealizedProfit30d = unreal30d
+		es.TotalCost30d = s30.totalCost
+		es.AvgRealizedProfit30d = avgRealized(s30.pnl, s30.sellNum)
+
+		es.AvgCost7d = s7.avgCost
+		es.BuyNum7d = s7.buyNum
+		es.SellNum7d = s7.sellNum
+		es.WinRate7d = s7.winRate
+		es.PNL7d = s7.pnl
+		es.PNLPercentage7d = s7.pnlPct
+		es.UnrealizedProfit7d = unreal7d
+		es.TotalCost7d = s7.totalCost
+		es.AvgRealizedProfit7d = avgRealized(s7.pnl, s7.sellNum)
+
+		es.AvgCost1d = s1.avgCost
+		es.BuyNum1d = s1.buyNum
+		es.SellNum1d = s1.sellNum
+		es.WinRate1d = s1.winRate
+		es.PNL1d = s1.pnl
+		es.PNLPercentage1d = s1.pnlPct
+		es.UnrealizedProfit1d = unreal1d
+		es.TotalCost1d = s1.totalCost
+		es.AvgRealizedProfit1d = avgRealized(s1.pnl, s1.sellNum)
+
+		es.DistributionGt500_30d = d30.gt500
+		es.Distribution200to500_30d = d30.between200to500
+		es.Distribution0to200_30d = d30.between0to200
+		es.DistributionN50to0_30d = d30.n50to0
+		es.DistributionLt50_30d = d30.lt50
+		es.DistributionGt500Percentage30d = d30.pGt500 * 100
+		es.Distribution200to500Percentage30d = d30.p200to500 * 100
+		es.Distribution0to200Percentage30d = d30.p0to200 * 100
+		es.DistributionN50to0Percentage30d = d30.pN50to0 * 100
+		es.DistributionLt50Percentage30d = d30.pLt50 * 100
+
+		es.DistributionGt500_7d = d7.gt500
+		es.Distribution200to500_7d = d7.between200to500
+		es.Distribution0to200_7d = d7.between0to200
+		es.DistributionN50to0_7d = d7.n50to0
+		es.DistributionLt50_7d = d7.lt50
+		es.DistributionGt500Percentage7d = d7.pGt500 * 100
+		es.Distribution200to500Percentage7d = d7.p200to500 * 100
+		es.Distribution0to200Percentage7d = d7.p0to200 * 100
+		es.DistributionN50to0Percentage7d = d7.pN50to0 * 100
+		es.DistributionLt50Percentage7d = d7.pLt50 * 100
+
+		if v, ok := updates["is_active"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				es.IsActive = b
+			} else {
+				es.IsActive = w.IsActive
+			}
+		} else {
+			es.IsActive = w.IsActive
+		}
+	} else {
+		// 無聚合時保留原值
+		*es = *w
+	}
+
+	es.UpdatedAt = time.Now()
+
+	return es, nil
 }
 
 func avgRealized(pnl float64, sellNum int) float64 {
@@ -579,70 +755,14 @@ func lastNDistinct(tokens []string, n int) []string {
 	return res
 }
 
-// getTokenPriceUSDWithCfg: 查 ES _source.price_usd（容錯加強，擴充多字段匹配）
-func getTokenPriceUSDWithCfg(ctx context.Context, cfg config.Config, tokenAddress string) (float64, error) {
-	baseURL := strings.TrimRight(cfg.ES.BaseURL, "/")
-	if baseURL == "" {
-		return 0, fmt.Errorf("ES base_url not set")
-	}
-	index := cfg.ES.Index
-	if index == "" {
-		index = "web3_tokens"
-	}
-	url := baseURL + "/" + index + "/_search"
-
-	payload := map[string]any{
-		"size": 1,
-		"query": map[string]any{
-			"bool": map[string]any{
-				"should": []any{
-					map[string]any{"term": map[string]any{"address.keyword": tokenAddress}},
-					map[string]any{"term": map[string]any{"address": tokenAddress}},
-					map[string]any{"term": map[string]any{"address_normalized": tokenAddress}},
-				},
-				"minimum_should_match": 1,
-			},
-		},
-	}
-	buf, _ := json.Marshal(payload)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if cfg.ES.Username != "" || cfg.ES.Password != "" {
-		req.SetBasicAuth(cfg.ES.Username, cfg.ES.Password)
-	}
-
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		msg := string(b)
-		if len(msg) > 300 {
-			msg = msg[:300]
+// hasSmartMoneyTag 檢查是否包含 "smart money" 標籤（忽略大小寫與前後空白）
+func hasSmartMoneyTag(tags []string) bool {
+	for _, t := range tags {
+		if strings.EqualFold(strings.TrimSpace(t), "smart money") {
+			return true
 		}
-		return 0, fmt.Errorf("es status %d body=%s", resp.StatusCode, msg)
 	}
-	var data struct {
-		Hits struct {
-			Hits []struct {
-				Source struct {
-					PriceUSD float64 `json:"price_usd"`
-				} `json:"_source"`
-			} `json:"hits"`
-		} `json:"hits"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return 0, err
-	}
-	if len(data.Hits.Hits) == 0 {
-		return 0, fmt.Errorf("price not found")
-	}
-	return data.Hits.Hits[0].Source.PriceUSD, nil
+	return false
 }
+
+// 移除舊的 HTTP 直連 ES 查價函式，統一走 SDK 的 SearchWithRouting

@@ -11,18 +11,18 @@ import (
 
 // Config 定义整个配置的结构
 type Config struct {
-	Log                LogConfig      `mapstructure:"log"`
-	Kafka              KafkaConfig    `mapstructure:"kafka"`
-	Redis              RedisConfig    `mapstructure:"redis"`
-	Postgres           PostgresConfig `mapstructure:"postgres"`
-	SelectDB           SelectDBConfig `mapstructure:"selectdb"`
-	ES                 ESConfig       `mapstructure:"es"`
-	Lark               LarkConfig     `mapstructure:"lark"`
-	Worker             WorkerConfig   `mapstructure:"worker"`
-	Monitor            MonitorConfig  `mapstructure:"monitor"`
-	BydRpcUrl          string         `mapstructure:"byd_rpc_url"`
-	BscClientRawUrl    string         `mapstructure:"bsc_client_rawurl"`
-	SolanaClientRawUrl string         `mapstructure:"solana_client_rawurl"`
+	Log                LogConfig           `mapstructure:"log"`
+	Kafka              KafkaConfig         `mapstructure:"kafka"`
+	Redis              RedisConfig         `mapstructure:"redis"`
+	Postgres           PostgresConfig      `mapstructure:"postgres"`
+	SelectDB           SelectDBConfig      `mapstructure:"selectdb"`
+	Elasticsearch      ElasticsearchConfig `mapstructure:"elasticsearch"`
+	Lark               LarkConfig          `mapstructure:"lark"`
+	Worker             WorkerConfig        `mapstructure:"worker"`
+	Monitor            MonitorConfig       `mapstructure:"monitor"`
+	BydRpcUrl          string              `mapstructure:"byd_rpc_url"`
+	BscClientRawUrl    string              `mapstructure:"bsc_client_rawurl"`
+	SolanaClientRawUrl string              `mapstructure:"solana_client_rawurl"`
 }
 
 // KafkaConfig Kafka 配置
@@ -41,6 +41,7 @@ type RedisConfig struct {
 	Password  string `mapstructure:"password"`
 	DB        int    `mapstructure:"db"`
 	DBMetrics int    `mapstructure:"db_metrics"`
+	DBPrice   int    `mapstructure:"db_price"`
 }
 
 // PostgresConfig PostgreSQL 配置
@@ -53,12 +54,12 @@ type SelectDBConfig struct {
 	DSN string `mapstructure:"dsn"`
 }
 
-// ESConfig Elasticsearch 配置
-type ESConfig struct {
-	BaseURL  string `mapstructure:"base_url"`
-	Index    string `mapstructure:"index"`
-	Username string `mapstructure:"username"`
-	Password string `mapstructure:"password"`
+type ElasticsearchConfig struct {
+	Addresses         []string `mapstructure:"addresses"`
+	Username          string   `mapstructure:"username"`
+	Password          string   `mapstructure:"password"`
+	HoldingsIndexName string   `mapstructure:"holdings_index_name"`
+	WalletsIndexName  string   `mapstructure:"wallets_index_name"`
 }
 
 // LarkConfig Lark 配置
