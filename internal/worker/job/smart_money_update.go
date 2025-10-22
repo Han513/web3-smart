@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -129,6 +130,44 @@ func (j *SmartMoneyAnalyzer) getTokenPriceUSD(ctx context.Context, tokenAddress 
 		return v, nil
 	}
 	return 0, fmt.Errorf("price_usd not found")
+}
+
+// getTokenMeta 從 ES 取得 token 名稱與圖示（若不存在則回傳空字串）
+func (j *SmartMoneyAnalyzer) getTokenMeta(ctx context.Context, tokenAddress string) (name string, icon string) {
+	es := j.repo.GetElasticsearchClient()
+	if es == nil {
+		return "", ""
+	}
+	query := map[string]any{
+		"size": 1,
+		"query": map[string]any{
+			"bool": map[string]any{
+				"should": []any{
+					map[string]any{"term": map[string]any{"address.keyword": tokenAddress}},
+					map[string]any{"term": map[string]any{"address": tokenAddress}},
+					map[string]any{"term": map[string]any{"address_normalized": tokenAddress}},
+				},
+				"minimum_should_match": 1,
+			},
+		},
+		"_source": []string{"name", "logo"},
+	}
+	index := "web3_tokens"
+	res, err := es.SearchWithRouting(ctx, index, tokenAddress, query)
+	if err != nil {
+		return "", ""
+	}
+	if len(res.Hits.Hits) == 0 {
+		return "", ""
+	}
+	src := res.Hits.Hits[0].Source
+	if v, ok := src["name"].(string); ok {
+		name = v
+	}
+	if v, ok := src["logo"].(string); ok {
+		icon = v
+	}
+	return name, icon
 }
 
 func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w *model.WalletSummary) (*model.WalletSummary, error) {
@@ -427,7 +466,22 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 
 	// 最近三個不重複 token（從最新開始）
 	recent := lastNDistinct(recentTokens, 3)
-	tokenList := strings.Join(recent, ",")
+	type tokenItem struct {
+		TokenAddress string `json:"token_address"`
+		TokenIcon    string `json:"token_icon"`
+		TokenName    string `json:"token_name"`
+	}
+	items := make([]tokenItem, 0, len(recent))
+	for _, addr := range recent {
+		name, icon := j.getTokenMeta(ctx, addr)
+		items = append(items, tokenItem{
+			TokenAddress: addr,
+			TokenIcon:    icon,
+			TokenName:    name,
+		})
+	}
+	tokenListBytes, _ := json.Marshal(items)
+	tokenList := string(tokenListBytes)
 
 	// 是否視為活躍/聰明錢（與 python 規則一致）
 	isSmart := s30.pnl > 0 && s30.winRate > 0.3 && s30.winRate != 1 && s30.totalTx < 2000 && lastTxTime >= ts30d
@@ -753,16 +807,6 @@ func lastNDistinct(tokens []string, n int) []string {
 	// 若需要由新到舊即可直接返回；若需要由舊到新可反轉。
 	// 這裡維持由新到舊。
 	return res
-}
-
-// hasSmartMoneyTag 檢查是否包含 "smart money" 標籤（忽略大小寫與前後空白）
-func hasSmartMoneyTag(tags []string) bool {
-	for _, t := range tags {
-		if strings.EqualFold(strings.TrimSpace(t), "smart money") {
-			return true
-		}
-	}
-	return false
 }
 
 // 移除舊的 HTTP 直連 ES 查價函式，統一走 SDK 的 SearchWithRouting

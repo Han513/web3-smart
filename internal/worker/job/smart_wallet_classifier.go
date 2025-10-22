@@ -70,7 +70,7 @@ func (j *SmartWalletClassifier) Run(ctx context.Context) error {
 			// 沒有 smart money 標籤時，套用五條件
 			winRatePct := w.WinRate30d * 100
 			condWinRate := winRatePct > 60
-			condTx7d := w.TotalTransactionNum7d > 100
+			condTx7d := (w.BuyNum7d + w.SellNum7d) > 100
 			condPNL30d := w.PNL30d > 1000
 			condPNLPct := w.PNLPercentage30d > 100
 			condDist := w.DistributionLt50Percentage30d < 30
@@ -79,7 +79,7 @@ func (j *SmartWalletClassifier) Run(ctx context.Context) error {
 			j.logger.Info("smart_wallet_classifier rule check",
 				zap.String("wallet", w.WalletAddress),
 				zap.Float64("win_rate_30d_pct", winRatePct),
-				zap.Int("total_tx_7d", w.TotalTransactionNum7d),
+				zap.Int("total_tx_7d", w.BuyNum7d+w.SellNum7d),
 				zap.Float64("pnl_30d", w.PNL30d),
 				zap.Float64("pnl_pct_30d", w.PNLPercentage30d),
 				zap.Float64("dist_lt50_pct_30d", w.DistributionLt50Percentage30d),
@@ -97,7 +97,7 @@ func (j *SmartWalletClassifier) Run(ctx context.Context) error {
 				newTags = append(newTags, "smart money")
 				if err := db.WithContext(ctx).Model(&model.WalletSummary{}).
 					Where("wallet_address = ?", w.WalletAddress).
-					Update("tags", model.StringArray(newTags)).Error; err != nil {
+					Update("tags", newTags).Error; err != nil {
 					j.logger.Error("append smart money tag failed", zap.String("wallet", w.WalletAddress), zap.Error(err))
 				} else {
 					j.logger.Info("appended smart money tag", zap.String("wallet", w.WalletAddress))
@@ -113,7 +113,7 @@ func (j *SmartWalletClassifier) Run(ctx context.Context) error {
 	return nil
 }
 
-func hasSmartMoneyTag(tags model.StringArray) bool {
+func hasSmartMoneyTag(tags []string) bool {
 	for _, t := range tags {
 		if strings.EqualFold(strings.TrimSpace(t), "smart money") {
 			return true
@@ -124,7 +124,7 @@ func hasSmartMoneyTag(tags model.StringArray) bool {
 
 // shouldMarkSmart 根據錢包近期統計與交易決定是否標記為聰明錢
 // 目前先使用占位實作：返回 false。稍後將根據你的規則補上。
-func (j *SmartWalletClassifier) shouldMarkSmart(ctx context.Context, db *gorm.DB, w *model.WalletSummary) (bool, error) {
+func (j *SmartWalletClassifier) shouldMarkSmart(_ context.Context, _ *gorm.DB, w *model.WalletSummary) (bool, error) {
 	// 已改為基於 tags 決策，保留此函式以便未來擴充（目前不使用）
 	return hasSmartMoneyTag(w.Tags), nil
 }
