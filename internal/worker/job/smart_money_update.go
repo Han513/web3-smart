@@ -150,7 +150,7 @@ func (j *SmartMoneyAnalyzer) getTokenMeta(ctx context.Context, tokenAddress stri
 				"minimum_should_match": 1,
 			},
 		},
-		"_source": []string{"name", "logo"},
+		"_source": []string{"symbol", "logo"},
 	}
 	index := "web3_tokens"
 	res, err := es.SearchWithRouting(ctx, index, tokenAddress, query)
@@ -161,7 +161,7 @@ func (j *SmartMoneyAnalyzer) getTokenMeta(ctx context.Context, tokenAddress stri
 		return "", ""
 	}
 	src := res.Hits.Hits[0].Source
-	if v, ok := src["name"].(string); ok {
+	if v, ok := src["symbol"].(string); ok {
 		name = v
 	}
 	if v, ok := src["logo"].(string); ok {
