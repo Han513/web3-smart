@@ -22,6 +22,11 @@ func NewMetricsServer(cfg config.MonitorConfig) *MetricsServer {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status": "ok"}`))
+	})
+
 	return &MetricsServer{
 		cfg: cfg,
 		server: &http.Server{

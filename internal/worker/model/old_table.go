@@ -153,6 +153,10 @@ type OldWalletSummary struct {
 	IsActive            bool      `gorm:"column:is_active;type:boolean" json:"is_active"`
 }
 
+func (w *OldWalletSummary) TableName() string {
+	return "dex_query_v1.wallet"
+}
+
 func (w *WalletSummary) OldWalletSummary() string {
 	return "dex_query_v1.wallet"
 }

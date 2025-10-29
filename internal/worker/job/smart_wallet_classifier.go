@@ -8,12 +8,10 @@ import (
 	"web3-smart/internal/worker/model"
 	"web3-smart/internal/worker/repository"
 
+	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
-
-// SmartWalletClassifier 週期檢查 is_smart_wallet=false 的錢包，符合規則則標記為 true
-// 規則由 shouldMarkSmart 提供，之後可根據你的條件補充
 
 type SmartWalletClassifier struct {
 	repo   repository.Repository
@@ -54,7 +52,6 @@ func (j *SmartWalletClassifier) Run(ctx context.Context) error {
 			break
 		}
 
-		// 逐一檢查並輸出日誌
 		for i := range wallets {
 			w := &wallets[i]
 			if hasSmartMoneyTag(w.Tags) {
@@ -67,22 +64,21 @@ func (j *SmartWalletClassifier) Run(ctx context.Context) error {
 				continue
 			}
 
-			// 沒有 smart money 標籤時，套用五條件
-			winRatePct := w.WinRate30d * 100
+			winRatePct := w.WinRate30d.Mul(decimal.NewFromInt(100)).InexactFloat64()
 			condWinRate := winRatePct > 60
 			condTx7d := (w.BuyNum7d + w.SellNum7d) > 100
-			condPNL30d := w.PNL30d > 1000
-			condPNLPct := w.PNLPercentage30d > 100
-			condDist := w.DistributionLt50Percentage30d < 30
+			condPNL30d := w.PNL30d.GreaterThan(decimal.NewFromFloat(1000))
+			condPNLPct := w.PNLPercentage30d.GreaterThan(decimal.NewFromFloat(100))
+			condDist := w.DistributionLt50Percentage30d.LessThan(decimal.NewFromFloat(30))
 			passed := condWinRate && condTx7d && condPNL30d && condPNLPct && condDist
 
 			j.logger.Info("smart_wallet_classifier rule check",
 				zap.String("wallet", w.WalletAddress),
 				zap.Float64("win_rate_30d_pct", winRatePct),
 				zap.Int("total_tx_7d", w.BuyNum7d+w.SellNum7d),
-				zap.Float64("pnl_30d", w.PNL30d),
-				zap.Float64("pnl_pct_30d", w.PNLPercentage30d),
-				zap.Float64("dist_lt50_pct_30d", w.DistributionLt50Percentage30d),
+				zap.Float64("pnl_30d", w.PNL30d.InexactFloat64()),
+				zap.Float64("pnl_pct_30d", w.PNLPercentage30d.InexactFloat64()),
+				zap.Float64("dist_lt50_pct_30d", w.DistributionLt50Percentage30d.InexactFloat64()),
 				zap.Bool("cond_win_rate_gt_60", condWinRate),
 				zap.Bool("cond_tx7d_gt_100", condTx7d),
 				zap.Bool("cond_pnl30d_gt_1000", condPNL30d),
@@ -92,7 +88,6 @@ func (j *SmartWalletClassifier) Run(ctx context.Context) error {
 			)
 
 			if passed {
-				// 追加 smart money 標籤並寫回
 				newTags := append([]string{}, w.Tags...)
 				newTags = append(newTags, "smart money")
 				if err := db.WithContext(ctx).Model(&model.WalletSummary{}).
@@ -122,8 +117,6 @@ func hasSmartMoneyTag(tags []string) bool {
 	return false
 }
 
-// shouldMarkSmart 根據錢包近期統計與交易決定是否標記為聰明錢
-// 目前先使用占位實作：返回 false。稍後將根據你的規則補上。
 func (j *SmartWalletClassifier) shouldMarkSmart(_ context.Context, _ *gorm.DB, w *model.WalletSummary) (bool, error) {
 	// 已改為基於 tags 決策，保留此函式以便未來擴充（目前不使用）
 	return hasSmartMoneyTag(w.Tags), nil

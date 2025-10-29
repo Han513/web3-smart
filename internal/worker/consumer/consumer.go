@@ -3,12 +3,13 @@ package consumer
 import (
 	"context"
 	"errors"
-	"github.com/segmentio/kafka-go"
-	"go.uber.org/zap"
-	"golang.org/x/time/rate"
 	"strings"
 	"time"
 	"web3-smart/internal/worker/config"
+
+	"github.com/segmentio/kafka-go"
+	"go.uber.org/zap"
+	"golang.org/x/time/rate"
 )
 
 // KafkaConsumer 接口

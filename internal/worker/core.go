@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"time"
+
 	"web3-smart/internal/worker/config"
 	"web3-smart/internal/worker/consumer"
 	"web3-smart/internal/worker/job"
@@ -32,27 +33,39 @@ func New(cfg config.Config, logger *zap.Logger) *Core {
 	cacheLoad := job.NewCacheLoad(cfg, repo, logger)
 	scheduler.RegisterOnceJob("cache_load", cacheLoad.Run)
 
+	// 注册定时清理任务 - 每小时执行一次
+	transactionCleanup := job.NewTransactionCleanup(cfg, repo, logger)
+	scheduler.RegisterJob("transaction_cleanup", 1*time.Hour, transactionCleanup.Run)
+
+	tokenBalance := job.NewTokenBalance(cfg, repo, logger)
+	scheduler.RegisterJob("token_balance", 5*time.Minute, tokenBalance.Run)
+
 	// 定時：聰明錢資料聚合更新（每 2 小時）
 	analyzer := job.NewSmartMoneyAnalyzer(repo, logger)
 	analyzer.Cfg = cfg
 	scheduler.RegisterJob("smart_money_analyze", 2*time.Hour, analyzer.Run)
+
+	// 定時：聰明錢錢包分類器（每 6 小時）
+	classifier := job.NewSmartWalletClassifier(repo, logger)
+	scheduler.RegisterJob("smart_wallet_classifier", 6*time.Hour, classifier.Run)
 
 	// 定時：清理 30 天前舊交易（每天）
 	cleanup := job.NewCleanupJob(repo, logger)
 	scheduler.RegisterJob("cleanup_old_transactions", 24*time.Hour, cleanup.Run)
 
 	// 初始化消费者
-	// consumers := []consumer.KafkaConsumer{
-	// 	consumer.NewTradeConsumer(cfg, logger, repo),
-	// }
+	consumers := []consumer.KafkaConsumer{
+		consumer.NewTradeConsumer(cfg, logger, repo),
+		consumer.NewBalanceConsumer(cfg, logger, repo),
+	}
 
 	core := &Core{
 		cfg:       cfg,
 		repo:      repo,
 		tl:        logger,
 		scheduler: scheduler,
-		// consumers: consumers,
-		metrics: monitor.NewMetricsServer(cfg.Monitor),
+		consumers: consumers,
+		metrics:   monitor.NewMetricsServer(cfg.Monitor),
 	}
 	return core
 }
@@ -65,9 +78,9 @@ func (c *Core) Start(ctx context.Context) {
 	}
 
 	// 启动消费者
-	// for _, cons := range c.consumers {
-	// 	go cons.Run(ctx)
-	// }
+	for _, cons := range c.consumers {
+		go cons.Run(ctx)
+	}
 
 	// 启动调度器
 	c.scheduler.Start(ctx)

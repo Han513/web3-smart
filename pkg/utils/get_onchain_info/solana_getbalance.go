@@ -23,9 +23,9 @@ func GetSolanaBalance(ctx context.Context, client *rpc.Client, walletAddress str
 		fmt.Printf("获取WSOL余额失败: %v\n", err)
 	}
 
-	fmt.Printf("钱包地址: %s\n", walletAddress)
-	fmt.Printf("SOL余额: %.9f SOL\n", solBalance)
-	fmt.Printf("WSOL余额: %.9f WSOL\n", wsolBalance)
+	// fmt.Printf("钱包地址: %s\n", walletAddress)
+	// fmt.Printf("SOL余额: %.9f SOL\n", solBalance)
+	// fmt.Printf("WSOL余额: %.9f WSOL\n", wsolBalance)
 
 	m := map[string]decimal.Decimal{
 		quotecoin.ID501_WSOL_ADDRESS: decimal.NewFromFloat(wsolBalance),

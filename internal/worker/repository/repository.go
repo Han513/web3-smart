@@ -11,6 +11,7 @@ import (
 	"web3-smart/pkg/database"
 	"web3-smart/pkg/elasticsearch"
 	"web3-smart/pkg/evm_client"
+	selectdbclient "web3-smart/pkg/selectdb_client"
 	"web3-smart/pkg/solana_client"
 
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -42,6 +43,7 @@ type repositoryImpl struct {
 	logger       *zap.Logger
 	db           *gorm.DB
 	selectDB     *gorm.DB
+	selectDBHttp *selectdbclient.Client
 	esClient     *elasticsearch.Client
 	mainRdb      *redis.Client
 	metricsRdb   *redis.Client
@@ -60,6 +62,18 @@ func (r *repositoryImpl) init() {
 		panic(err)
 	}
 
+	r.selectDB, err = database.InitSelectDB(r.cfg.SelectDB.DSN)
+	if err != nil {
+		panic(err)
+	}
+	r.selectDBHttp, err = database.InitSelectDBHttpClient(r.cfg.SelectDB.BaseURL,
+		r.cfg.SelectDB.Database,
+		r.cfg.SelectDB.Username,
+		r.cfg.SelectDB.Password)
+	if err != nil {
+		panic(err)
+	}
+
 	// 初始化selectDB
 	//r.selectDB, err = database.InitSelectDB(r.cfg.SelectDB.DSN)
 	//if err != nil {
@@ -72,8 +86,8 @@ func (r *repositoryImpl) init() {
 		Username:  r.cfg.Elasticsearch.Username,
 		Password:  r.cfg.Elasticsearch.Password,
 		Indexs: map[string]map[string]interface{}{
-			r.cfg.Elasticsearch.HoldingsIndexName: (*model.WalletHolding)(nil).ToESIndex(),
-			r.cfg.Elasticsearch.WalletsIndexName:  (*model.WalletSummary)(nil).ToESIndex(),
+			// r.cfg.Elasticsearch.HoldingsIndexName: (*model.WalletHolding)(nil).ToESIndex(),
+			r.cfg.Elasticsearch.WalletsIndexName: (*model.WalletSummary)(nil).ToESIndex(),
 		},
 	}, r.logger)
 	if err != nil {
@@ -154,6 +168,10 @@ func (r *repositoryImpl) GetDB() *gorm.DB {
 
 func (r *repositoryImpl) GetSelectDB() *gorm.DB {
 	return r.selectDB
+}
+
+func (r *repositoryImpl) GetSelectDBHttp() *selectdbclient.Client {
+	return r.selectDBHttp
 }
 
 func (r *repositoryImpl) GetElasticsearchClient() *elasticsearch.Client {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/md5"
 	"fmt"
-	"time"
 	"web3-smart/internal/worker/model"
 	"web3-smart/internal/worker/writer"
 	"web3-smart/pkg/elasticsearch"
@@ -29,6 +28,11 @@ func NewESHoldingWriter(esClient *elasticsearch.Client, logger *zap.Logger, inde
 func (w *ESHoldingWriter) BWrite(ctx context.Context, holdings []model.WalletHolding) error {
 	if len(holdings) == 0 {
 		return nil
+	}
+
+	// 对所有holding数据应用精度限制
+	for i := range holdings {
+		limitHoldingPrecision(&holdings[i])
 	}
 
 	// 按token_address分组 - 使用具体的业务类型，更清晰
@@ -60,7 +64,12 @@ func (w *ESHoldingWriter) BWrite(ctx context.Context, holdings []model.WalletHol
 
 	close(errChan)
 
-	return lastErr
+	if lastErr != nil {
+		w.logger.Warn("❌ ES write failed, exceeded the maximum number of retries", zap.Error(lastErr), zap.Any("holdings", holdings))
+		return lastErr
+	}
+
+	return nil
 }
 
 // writeBulkOperations 构建并执行批量操作
@@ -136,12 +145,13 @@ func (w *ESHoldingWriter) convertToESDoc(holding *model.WalletHolding) map[strin
 		"created_at":             holding.CreatedAt,
 	}
 
+	// 时间字段已经是毫秒时间戳(int64)，可直接使用
 	if holding.PositionOpenedAt != nil {
-		doc["position_opened_at"] = time.UnixMilli(*holding.PositionOpenedAt)
+		doc["position_opened_at"] = *holding.PositionOpenedAt
 	}
 
 	if holding.LastTransactionTime > 0 {
-		doc["last_transaction_time"] = time.UnixMilli(holding.LastTransactionTime)
+		doc["last_transaction_time"] = holding.LastTransactionTime
 	}
 
 	return doc
@@ -151,26 +161,26 @@ func (w *ESHoldingWriter) convertToESDoc(holding *model.WalletHolding) map[strin
 func (w *ESHoldingWriter) generateCombinedTags(holding *model.WalletHolding) []string {
 	var combined []string
 
-	// 添加基础标签
-	if !holding.IsCleared {
-		combined = append(combined, "active")
-	} else {
-		combined = append(combined, "cleared")
-	}
+	// // 添加基础标签
+	// if !holding.IsCleared {
+	// 	combined = append(combined, "active")
+	// } else {
+	// 	combined = append(combined, "cleared")
+	// }
 
-	// 添加价值区间标签
-	if holding.ValueUSD >= 100000 {
-		combined = append(combined, "whale")
-	} else if holding.ValueUSD >= 10000 {
-		combined = append(combined, "big_holder")
-	} else if holding.ValueUSD >= 1000 {
-		combined = append(combined, "medium_holder")
-	} else {
-		combined = append(combined, "small_holder")
-	}
+	// // 添加价值区间标签
+	// if holding.ValueUSD.GreaterThanOrEqual(decimal.NewFromInt(100000)) {
+	// 	combined = append(combined, "whale")
+	// } else if holding.ValueUSD.GreaterThanOrEqual(decimal.NewFromInt(10000)) {
+	// 	combined = append(combined, "big_holder")
+	// } else if holding.ValueUSD.GreaterThanOrEqual(decimal.NewFromInt(1000)) {
+	// 	combined = append(combined, "medium_holder")
+	// } else {
+	// 	combined = append(combined, "small_holder")
+	// }
 
 	// 添加原始标签
-	combined = append(combined, holding.Tags...)
+	combined = append(combined, []string(holding.Tags)...)
 
 	return combined
 }

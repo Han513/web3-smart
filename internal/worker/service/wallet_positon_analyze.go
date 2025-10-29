@@ -28,7 +28,7 @@ type WalletPositonAnalyze struct {
 }
 
 func NewWalletPositonAnalyze(cfg config.Config, logger *zap.Logger, repo repository.Repository) *WalletPositonAnalyze {
-	holdingDbWriter := writer.NewAsyncBatchWriter(logger, holding.NewDbHoldingWriter(repo.GetDB(), logger), 1000, 300*time.Millisecond, "holding_db_writer", 3)
+	holdingDbWriter := writer.NewAsyncBatchWriter(logger, holding.NewDbHoldingWriter(repo.GetDB(), logger), 1000, 300*time.Millisecond, "holding_db_writer", 2)
 	holdingDbWriter.Start(context.Background())
 
 	//holdingEsWriter := writer.NewAsyncBatchWriter(logger, holding.NewESHoldingWriter(repo.GetElasticsearchClient(), logger, cfg.Elasticsearch.HoldingsIndexName), 1000, 300*time.Millisecond, "holding_es_writer", 3)
@@ -76,7 +76,7 @@ func (s *WalletPositonAnalyze) ProcessTrade(trade model.TradeEvent) (smartMoney 
 	// 检查是否是系统聪明钱smart money
 	smartMoney, err = s.getSmartMoney(ctx, chainId, trade.Event.Address)
 	if err == nil && smartMoney != nil { // 将聪明钱的tags合并去重
-		tags = append(tags, smartMoney.Tags...)
+		tags = append(tags, []string(smartMoney.Tags)...)
 		tags = s.uniqueTags(tags)
 	}
 	// 获取最早的池子创建时间，校验是否在一分钟内发生的交易
@@ -106,12 +106,16 @@ func (s *WalletPositonAnalyze) ProcessTrade(trade model.TradeEvent) (smartMoney 
 	if holding == nil {
 		holding = model.NewWalletHolding(trade, *tokenInfo, chainId, isDev, tags)
 		txType = model.TX_TYPE_BUILD
+		if holding == nil { // 如果新持仓也是nil，则返回空
+			return nil, nil, ""
+		}
 	} else {
 		txType = holding.AggregateTrade(trade, *tokenInfo, isDev, tags)
 	}
 
 	// 异步写入数据库
-	s.holdingDbWriter.Submit(*holding)
+	hashKey := utils.MergeHashKey(trade.Event.TokenAddress, trade.Event.Time)
+	s.holdingDbWriter.Submit(*holding, hashKey)
 	//s.holdingEsWriter.Submit(*holding)
 
 	// 更新持仓缓存
@@ -132,15 +136,15 @@ func (s *WalletPositonAnalyze) getHoldingByWalletAndToken(ctx context.Context, c
 	}
 
 	if holding == nil {
-		s.tl.Info("未找到持仓信息，新建持仓记录",
+		s.tl.Debug("未找到持仓信息，新建持仓记录",
 			zap.String("wallet_address", walletAddress),
 			zap.String("token_address", tokenAddress))
 	} else {
 		s.tl.Debug("找到持仓信息",
 			zap.String("wallet_address", walletAddress),
 			zap.String("token_address", tokenAddress),
-			zap.Float64("amount", holding.Amount),
-			zap.Float64("value_usd", holding.ValueUSD))
+			zap.Float64("amount", holding.Amount.InexactFloat64()),
+			zap.Float64("value_usd", holding.ValueUSD.InexactFloat64()))
 	}
 
 	return holding, nil

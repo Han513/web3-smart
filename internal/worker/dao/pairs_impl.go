@@ -61,7 +61,7 @@ func (p *pairsDAO) GetEarliestBlockTimestamp(ctx context.Context, chainId uint64
 	err = p.db.WithContext(ctx).
 		Table("dex_query_v1.pairs").
 		Select("block_timestamp").
-		Where("chain_id = ? AND (base = ? OR quote = ?)", chainId, tokenAddress, tokenAddress).
+		Where("chain_id = ? AND (base = ? OR quote = ?) AND block_timestamp IS NOT NULL", chainId, tokenAddress, tokenAddress).
 		Order("block_timestamp ASC").
 		Limit(1).
 		Scan(&blockTimestamp).Error

@@ -2,13 +2,14 @@ package logger
 
 import (
 	"context"
+	"io"
+	"os"
+	"path/filepath"
+
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
-	"io"
-	"os"
-	"path/filepath"
 )
 
 var (
@@ -49,10 +50,10 @@ func NewLogger(serviceName string) *zap.Logger {
 
 	//fileCore := zapcore.NewCore(jsonEncoder, zapcore.AddSync(file), logLevel)
 	fileCore := zapcore.NewCore(jsonEncoder, zapcore.AddSync(writer), logLevel)
-	consoleCore := zapcore.NewCore(zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig()), zapcore.Lock(os.Stdout), zap.InfoLevel)
+	// consoleCore := zapcore.NewCore(zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig()), zapcore.Lock(os.Stdout), zap.InfoLevel)
 
-	core := zapcore.NewTee(fileCore, consoleCore)
-	//core := zapcore.NewTee(fileCore)
+	// core := zapcore.NewTee(fileCore, consoleCore)
+	core := zapcore.NewTee(fileCore)
 
 	logger = zap.New(core, zap.AddCaller())
 	return logger

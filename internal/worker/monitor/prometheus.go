@@ -79,6 +79,13 @@ var (
 		},
 		[]string{"writer_id"},
 	)
+	BalanceDelay = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "balance_delay",
+			Help: "Balance written delay.",
+		},
+		[]string{"network"},
+	)
 )
 
 func init() {
@@ -96,5 +103,6 @@ func init() {
 		AsyncWriterFlushCount,
 		AsyncWriterFlushDuration,
 		AsyncWriterItemsWritten,
+		BalanceDelay,
 	)
 }

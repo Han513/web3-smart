@@ -81,10 +81,10 @@ func (c *Client) BulkWrite(ctx context.Context, operations []BulkOperation) erro
 			},
 		}
 
-		// 如果有routing，添加routing
-		if op.Routing != "" {
-			actionLine[op.Action].(map[string]interface{})["_routing"] = op.Routing
-		}
+		// 暂时移除routing支持，因为ES版本不支持_routing参数
+		// if op.Routing != "" {
+		//	actionLine[op.Action].(map[string]interface{})["_routing"] = op.Routing
+		// }
 
 		// 写入操作行
 		actionBytes, _ := json.Marshal(actionLine)
@@ -168,6 +168,36 @@ func (c *Client) SearchWithRouting(ctx context.Context, indexName, routing strin
 
 	if res.IsError() {
 		return nil, fmt.Errorf("search with routing error: %s", res.String())
+	}
+
+	var result SearchResult
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode search result: %w", err)
+	}
+
+	return &result, nil
+}
+
+// Search 普通搜索（不指定 routing）
+func (c *Client) Search(ctx context.Context, indexName string, query map[string]interface{}) (*SearchResult, error) {
+	queryJSON, err := json.Marshal(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal query: %w", err)
+	}
+
+	req := esapi.SearchRequest{
+		Index: []string{indexName},
+		Body:  strings.NewReader(string(queryJSON)),
+	}
+
+	res, err := req.Do(ctx, c.es)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute search: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		return nil, fmt.Errorf("search error: %s", res.String())
 	}
 
 	var result SearchResult

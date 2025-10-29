@@ -5,12 +5,7 @@ import (
 	"hash/crc32"
 )
 
-func MergeKlineHashKey(poolAddress string, timestamp int64) string {
-	timeWindow := timestamp - (timestamp % 10)
-	return fmt.Sprintf("%s_%d", poolAddress, timeWindow)
-}
-
-func MergeAggKlineHashKey(token string, timestamp int64) string {
+func MergeHashKey(token string, timestamp int64) string {
 	timeWindow := timestamp - (timestamp % 10)
 	return fmt.Sprintf("%s_%d", token, timeWindow)
 }

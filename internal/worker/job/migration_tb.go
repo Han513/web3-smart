@@ -3,6 +3,8 @@ package job
 import (
 	"context"
 	"fmt"
+	"math"
+	"strings"
 	"sync"
 	"time"
 	"web3-smart/internal/worker/config"
@@ -14,6 +16,8 @@ import (
 	"web3-smart/internal/worker/writer/wallet"
 	"web3-smart/pkg/utils"
 
+	"github.com/lib/pq"
+	"github.com/shopspring/decimal"
 	"gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker/common/bip0044"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -27,6 +31,36 @@ const (
 	// 限流器时间窗口
 	RateLimitWindow = time.Second
 )
+
+// limitDecimal 限制decimal.Decimal值的范围，防止PostgreSQL DECIMAL(50,20)溢出
+// DECIMAL(50,20)的整数部分最多30位，小数部分20位
+// 最大值: 999999999999999999999999999999.99999999999999999999
+// 最小值: -999999999999999999999999999999.99999999999999999999
+func limitDecimal(value decimal.Decimal) decimal.Decimal {
+	// DECIMAL(50,20)的最大值和最小值 (30位整数 + 20位小数)
+	maxDecimal50_20, _ := decimal.NewFromString("999999999999999999999999999999.99999999999999999999")
+	minDecimal50_20 := maxDecimal50_20.Neg()
+
+	// 1. 先检查是否超过总体范围
+	if value.GreaterThan(maxDecimal50_20) {
+		return maxDecimal50_20
+	}
+	if value.LessThan(minDecimal50_20) {
+		return minDecimal50_20
+	}
+
+	// 2. 精度处理：四舍五入到20位小数
+	return value.Round(20)
+}
+
+// limitFloat64ToDecimal 将float64值转为decimal.Decimal并限制精度
+func limitFloat64ToDecimal(value float64) decimal.Decimal {
+	// 处理NaN和Inf
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return decimal.Zero
+	}
+	return limitDecimal(decimal.NewFromFloat(value))
+}
 
 type MigrationTable struct {
 	cfg  config.Config
@@ -71,11 +105,11 @@ func NewMigrationTable(cfg config.Config, repo repository.Repository, logger *za
 
 func (m *MigrationTable) initWriters() {
 	db := m.repo.GetDB()
-	// esClient := m.repo.GetElasticsearchClient()
+	esClient := m.repo.GetElasticsearchClient()
 
 	// 初始化基础写入器
 	m.walletDBWriter = wallet.NewDbWalletWriter(db, m.tl)
-	// m.walletESWriter = wallet.NewESWalletWriter(esClient, m.tl, m.cfg.Elasticsearch.WalletsIndexName)
+	m.walletESWriter = wallet.NewESWalletWriter(esClient, m.tl, m.cfg.Elasticsearch.WalletsIndexName)
 	m.holdingDBWriter = holding.NewDbHoldingWriter(db, m.tl)
 	// m.holdingESWriter = holding.NewESHoldingWriter(esClient, m.tl, m.cfg.Elasticsearch.HoldingsIndexName)
 	m.transactionDBWriter = transaction.NewDbTransactionWriter(db, m.tl)
@@ -83,8 +117,8 @@ func (m *MigrationTable) initWriters() {
 	// 初始化异步批量写入器
 	m.walletAsyncWriter = writer.NewAsyncBatchWriter[model.WalletSummary](
 		m.tl, &multiWriter[model.WalletSummary]{
-			// writers: []writer.BatchWriter[model.WalletSummary]{m.walletDBWriter, m.walletESWriter},
-			writers: []writer.BatchWriter[model.WalletSummary]{m.walletDBWriter},
+			writers: []writer.BatchWriter[model.WalletSummary]{m.walletDBWriter, m.walletESWriter},
+			// writers: []writer.BatchWriter[model.WalletSummary]{m.walletDBWriter},
 		}, BatchSize, time.Millisecond*300, "wallet_migration", 2)
 
 	m.holdingAsyncWriter = writer.NewAsyncBatchWriter[model.WalletHolding](
@@ -289,7 +323,7 @@ func (m *MigrationTable) migrateWalletSummary(ctx context.Context) error {
 			if err := m.acquireToken(ctx); err != nil {
 				return err
 			}
-			m.walletAsyncWriter.Submit(wallet)
+			m.walletAsyncWriter.MustSubmit(wallet, utils.MergeHashKey(wallet.WalletAddress, wallet.UpdatedAt))
 		}
 
 		processed += int64(len(oldWallets))
@@ -348,6 +382,27 @@ func (m *MigrationTable) normalizeAddress(address string) string {
 	return address
 }
 
+// convertTokenListToArray 将逗号分隔的字符串转换为TokenList对象数组
+func convertTokenListToArray(tokenListStr string) model.TokenList {
+	if tokenListStr == "" {
+		return model.TokenList{}
+	}
+	tokens := strings.Split(tokenListStr, ",")
+	// 过滤空字符串并构建TokenInfo对象
+	var result model.TokenList
+	for _, tokenAddr := range tokens {
+		tokenAddr = strings.TrimSpace(tokenAddr)
+		if tokenAddr != "" {
+			result = append(result, model.TokenInfo{
+				TokenAddress: tokenAddr,
+				TokenIcon:    "", // 旧数据没有icon信息，设置为空
+				TokenName:    "", // 旧数据没有name信息，设置为空
+			})
+		}
+	}
+	return result
+}
+
 // convertOldWalletSummaryToNew 转换旧钱包摘要数据到新格式
 func (m *MigrationTable) convertOldWalletSummaryToNew(old model.OldWalletSummary, kolAvatarMap map[string]string) model.WalletSummary {
 	// 基础信息映射
@@ -355,54 +410,54 @@ func (m *MigrationTable) convertOldWalletSummaryToNew(old model.OldWalletSummary
 	new := model.WalletSummary{
 		WalletAddress:   checksumAddress,
 		Avatar:          "", // 初始为空，后面会从KOL数据中设置
-		Balance:         old.Balance,
-		BalanceUSD:      old.BalanceUSD,
+		Balance:         limitFloat64ToDecimal(old.Balance),
+		BalanceUSD:      limitFloat64ToDecimal(old.BalanceUSD),
 		ChainID:         old.ChainID,
 		TwitterName:     old.TwitterName,
 		TwitterUsername: old.TwitterUsername,
 		WalletType:      old.WalletType,
-		AssetMultiple:   old.AssetMultiple,
-		TokenList:       old.TokenList,
+		AssetMultiple:   limitFloat64ToDecimal(old.AssetMultiple),
+		TokenList:       convertTokenListToArray(old.TokenList),
 
 		// 交易数据 - 30天
-		AvgCost30d: old.AvgCost30d,
+		AvgCost30d: limitFloat64ToDecimal(old.AvgCost30d),
 		BuyNum30d:  old.BuyNum30d,
 		SellNum30d: old.SellNum30d,
-		WinRate30d: old.WinRate30d,
+		WinRate30d: limitFloat64ToDecimal(old.WinRate30d),
 
 		// 交易数据 - 7天
-		AvgCost7d: old.AvgCost7d,
+		AvgCost7d: limitFloat64ToDecimal(old.AvgCost7d),
 		BuyNum7d:  old.BuyNum7d,
 		SellNum7d: old.SellNum7d,
-		WinRate7d: old.WinRate7d,
+		WinRate7d: limitFloat64ToDecimal(old.WinRate7d),
 
 		// 交易数据 - 1天
-		AvgCost1d: old.AvgCost1d,
+		AvgCost1d: limitFloat64ToDecimal(old.AvgCost1d),
 		BuyNum1d:  old.BuyNum1d,
 		SellNum1d: old.SellNum1d,
-		WinRate1d: old.WinRate1d,
+		WinRate1d: limitFloat64ToDecimal(old.WinRate1d),
 
 		// 盈亏数据 - 30天
-		PNL30d:               old.PNL30d,
-		PNLPercentage30d:     old.PNLPercentage30d,
+		PNL30d:               limitFloat64ToDecimal(old.PNL30d),
+		PNLPercentage30d:     limitFloat64ToDecimal(old.PNLPercentage30d),
 		PNLPic30d:            old.PNLPic30d,
-		UnrealizedProfit30d:  old.UnrealizedProfit30d,
-		TotalCost30d:         old.TotalCost30d,
-		AvgRealizedProfit30d: old.AvgRealizedProfit30d,
+		UnrealizedProfit30d:  limitFloat64ToDecimal(old.UnrealizedProfit30d),
+		TotalCost30d:         limitFloat64ToDecimal(old.TotalCost30d),
+		AvgRealizedProfit30d: limitFloat64ToDecimal(old.AvgRealizedProfit30d),
 
 		// 盈亏数据 - 7天
-		PNL7d:               old.PNL7d,
-		PNLPercentage7d:     old.PNLPercentage7d,
-		UnrealizedProfit7d:  old.UnrealizedProfit7d,
-		TotalCost7d:         old.TotalCost7d,
-		AvgRealizedProfit7d: old.AvgRealizedProfit7d,
+		PNL7d:               limitFloat64ToDecimal(old.PNL7d),
+		PNLPercentage7d:     limitFloat64ToDecimal(old.PNLPercentage7d),
+		UnrealizedProfit7d:  limitFloat64ToDecimal(old.UnrealizedProfit7d),
+		TotalCost7d:         limitFloat64ToDecimal(old.TotalCost7d),
+		AvgRealizedProfit7d: limitFloat64ToDecimal(old.AvgRealizedProfit7d),
 
 		// 盈亏数据 - 1天
-		PNL1d:               old.PNL1d,
-		PNLPercentage1d:     old.PNLPercentage1d,
-		UnrealizedProfit1d:  old.UnrealizedProfit1d,
-		TotalCost1d:         old.TotalCost1d,
-		AvgRealizedProfit1d: old.AvgRealizedProfit1d,
+		PNL1d:               limitFloat64ToDecimal(old.PNL1d),
+		PNLPercentage1d:     limitFloat64ToDecimal(old.PNLPercentage1d),
+		UnrealizedProfit1d:  limitFloat64ToDecimal(old.UnrealizedProfit1d),
+		TotalCost1d:         limitFloat64ToDecimal(old.TotalCost1d),
+		AvgRealizedProfit1d: limitFloat64ToDecimal(old.AvgRealizedProfit1d),
 
 		// 收益分布数据 - 30天
 		DistributionGt500_30d:             old.DistributionGt500_30d,
@@ -410,11 +465,11 @@ func (m *MigrationTable) convertOldWalletSummaryToNew(old model.OldWalletSummary
 		Distribution0to200_30d:            old.Distribution0to200_30d,
 		DistributionN50to0_30d:            old.Distribution0to50_30d, // 映射字段名不同
 		DistributionLt50_30d:              old.DistributionLt50_30d,
-		DistributionGt500Percentage30d:    old.DistributionGt500Percentage30d,
-		Distribution200to500Percentage30d: old.Distribution200to500Percentage30d,
-		Distribution0to200Percentage30d:   old.Distribution0to200Percentage30d,
-		DistributionN50to0Percentage30d:   old.Distribution0to50Percentage30d, // 映射字段名不同
-		DistributionLt50Percentage30d:     old.DistributionLt50Percentage30d,
+		DistributionGt500Percentage30d:    limitFloat64ToDecimal(old.DistributionGt500Percentage30d),
+		Distribution200to500Percentage30d: limitFloat64ToDecimal(old.Distribution200to500Percentage30d),
+		Distribution0to200Percentage30d:   limitFloat64ToDecimal(old.Distribution0to200Percentage30d),
+		DistributionN50to0Percentage30d:   limitFloat64ToDecimal(old.Distribution0to50Percentage30d), // 映射字段名不同
+		DistributionLt50Percentage30d:     limitFloat64ToDecimal(old.DistributionLt50Percentage30d),
 
 		// 收益分布数据 - 7天
 		DistributionGt500_7d:             old.DistributionGt500_7d,
@@ -422,27 +477,31 @@ func (m *MigrationTable) convertOldWalletSummaryToNew(old model.OldWalletSummary
 		Distribution0to200_7d:            old.Distribution0to200_7d,
 		DistributionN50to0_7d:            old.Distribution0to50_7d, // 映射字段名不同
 		DistributionLt50_7d:              old.DistributionLt50_7d,
-		DistributionGt500Percentage7d:    old.DistributionGt500Percentage7d,
-		Distribution200to500Percentage7d: old.Distribution200to500Percentage7d,
-		Distribution0to200Percentage7d:   old.Distribution0to200Percentage7d,
-		DistributionN50to0Percentage7d:   old.Distribution0to50Percentage7d, // 映射字段名不同
-		DistributionLt50Percentage7d:     old.DistributionLt50Percentage7d,
+		DistributionGt500Percentage7d:    limitFloat64ToDecimal(old.DistributionGt500Percentage7d),
+		Distribution200to500Percentage7d: limitFloat64ToDecimal(old.Distribution200to500Percentage7d),
+		Distribution0to200Percentage7d:   limitFloat64ToDecimal(old.Distribution0to200Percentage7d),
+		DistributionN50to0Percentage7d:   limitFloat64ToDecimal(old.Distribution0to50Percentage7d), // 映射字段名不同
+		DistributionLt50Percentage7d:     limitFloat64ToDecimal(old.DistributionLt50Percentage7d),
 
 		// 时间和状态
-		LastTransactionTime: old.LastTransactionTime,
+		LastTransactionTime: old.LastTransactionTime * 1000,
 		IsActive:            old.IsActive,
-		UpdatedAt:           old.UpdateTime,
-		CreatedAt:           time.Now(), // 新建记录的创建时间
+		UpdatedAt:           old.UpdateTime.UnixMilli(),
+		CreatedAt:           time.Now().UnixMilli(), // 新建记录的创建时间
 	}
 
 	// 设置默认标签
+	var tags []string
 	if old.IsSmartWallet {
-		new.Tags = []string{model.TAG_SMART_MONEY}
+		tags = []string{model.TAG_SMART_MONEY}
 	}
 
 	if old.Tag != "" {
-		new.Tags = append(new.Tags, old.Tag)
+		tags = append(tags, old.Tag)
 	}
+
+	// 直接使用字符串数组
+	new.Tags = pq.StringArray(tags)
 
 	// 从KOL钱包映射中设置头像
 	if avatar, exists := kolAvatarMap[old.WalletAddress]; exists {
@@ -504,7 +563,7 @@ func (m *MigrationTable) migrateWalletHolding(ctx context.Context) error {
 			if err := m.acquireToken(ctx); err != nil {
 				return err
 			}
-			m.holdingAsyncWriter.Submit(holding)
+			m.holdingAsyncWriter.MustSubmit(holding, utils.MergeHashKey(holding.WalletAddress, holding.UpdatedAt))
 		}
 
 		processed += int64(len(holdingWithStates))
@@ -606,31 +665,31 @@ func (m *MigrationTable) convertHoldingWithStateToNew(data HoldingWithTokenState
 		TokenAddress:  utils.ChecksumAddress(data.HTokenAddress, data.HChain),
 		TokenIcon:     data.HTokenIcon,
 		TokenName:     data.HTokenName,
-		Amount:        data.HAmount,
-		ValueUSD:      data.HValueUSDT, // 映射字段名
+		Amount:        limitFloat64ToDecimal(data.HAmount),
+		ValueUSD:      limitFloat64ToDecimal(data.HValueUSDT), // 映射字段名
 
 		// 盈亏数据（从holding表）
-		UnrealizedProfits: data.HUnrealizedProfits,
-		PNL:               data.HPNL,
-		PNLPercentage:     data.HPNLPercentage,
-		AvgPrice:          data.HAvgPrice,
-		CurrentTotalCost:  data.HCumulativeCost, // 映射字段名
-		MarketCap:         data.HMarketCap,
+		UnrealizedProfits: limitFloat64ToDecimal(data.HUnrealizedProfits),
+		PNL:               limitFloat64ToDecimal(data.HPNL),
+		PNLPercentage:     limitFloat64ToDecimal(data.HPNLPercentage),
+		AvgPrice:          limitFloat64ToDecimal(data.HAvgPrice),
+		CurrentTotalCost:  limitFloat64ToDecimal(data.HCumulativeCost), // 映射字段名
+		MarketCap:         limitFloat64ToDecimal(data.HMarketCap),
 		IsCleared:         data.HIsCleared,
 		IsDev:             false, // 旧表没有这个字段，默认false
 
 		// 历史累计状态 - 默认值，会被TokenState数据覆盖
-		HistoricalBuyAmount:  data.HAmount,           // 默认：假设当前持仓就是历史买入
-		HistoricalSellAmount: 0,                      // 默认为0
-		HistoricalBuyCost:    data.HCumulativeCost,   // 默认：累计成本即为买入成本
-		HistoricalSellValue:  data.HCumulativeProfit, // 默认：累计盈利
-		HistoricalBuyCount:   1,                      // 默认为1
-		HistoricalSellCount:  0,                      // 默认为0
+		HistoricalBuyAmount:  limitFloat64ToDecimal(data.HAmount),           // 默认：假设当前持仓就是历史买入
+		HistoricalSellAmount: decimal.Zero,                                  // 默认为0
+		HistoricalBuyCost:    limitFloat64ToDecimal(data.HCumulativeCost),   // 默认：累计成本即为买入成本
+		HistoricalSellValue:  limitFloat64ToDecimal(data.HCumulativeProfit), // 默认：累计盈利
+		HistoricalBuyCount:   1,                                             // 默认为1
+		HistoricalSellCount:  0,                                             // 默认为0
 
 		// 时间信息（从holding表）
-		LastTransactionTime: data.HLastTransactionTime,
-		UpdatedAt:           data.HTime,
-		CreatedAt:           time.Now(),
+		LastTransactionTime: data.HLastTransactionTime * 1000,
+		UpdatedAt:           data.HTime.UnixMilli(),
+		CreatedAt:           time.Now().UnixMilli(),
 	}
 
 	// 设置ChainID，从chain字段推导
@@ -639,16 +698,16 @@ func (m *MigrationTable) convertHoldingWithStateToNew(data HoldingWithTokenState
 
 	// 如果有TokenState数据，使用其覆盖默认值
 	if data.TSHistoricalBuyAmount != nil {
-		new.HistoricalBuyAmount = *data.TSHistoricalBuyAmount
+		new.HistoricalBuyAmount = limitFloat64ToDecimal(*data.TSHistoricalBuyAmount)
 	}
 	if data.TSHistoricalSellAmount != nil {
-		new.HistoricalSellAmount = *data.TSHistoricalSellAmount
+		new.HistoricalSellAmount = limitFloat64ToDecimal(*data.TSHistoricalSellAmount)
 	}
 	if data.TSHistoricalBuyCost != nil {
-		new.HistoricalBuyCost = *data.TSHistoricalBuyCost
+		new.HistoricalBuyCost = limitFloat64ToDecimal(*data.TSHistoricalBuyCost)
 	}
 	if data.TSHistoricalSellValue != nil {
-		new.HistoricalSellValue = *data.TSHistoricalSellValue
+		new.HistoricalSellValue = limitFloat64ToDecimal(*data.TSHistoricalSellValue)
 	}
 	if data.TSHistoricalBuyCount != nil {
 		new.HistoricalBuyCount = *data.TSHistoricalBuyCount
@@ -659,23 +718,27 @@ func (m *MigrationTable) convertHoldingWithStateToNew(data HoldingWithTokenState
 
 	// 使用TokenState的建仓时间（如果有的话）
 	if data.TSPositionOpenedAt != nil {
-		new.PositionOpenedAt = data.TSPositionOpenedAt
+		tmp := *data.TSPositionOpenedAt * 1000
+		new.PositionOpenedAt = &tmp
 	}
 
 	// 使用TokenState的最后交易时间（如果更准确的话）
 	if data.TSLastTransactionTime != nil && *data.TSLastTransactionTime > new.LastTransactionTime {
-		new.LastTransactionTime = *data.TSLastTransactionTime
+		new.LastTransactionTime = *data.TSLastTransactionTime * 1000
+		if *data.TSLastTransactionTime > 1800000000 { // 如果是毫秒级时间戳，则不操作
+			new.LastTransactionTime = *data.TSLastTransactionTime
+		}
 	}
 
 	// 使用TokenState的当前持仓数据（可能更准确）
 	if data.TSCurrentAmount != nil && *data.TSCurrentAmount > 0 {
-		new.Amount = *data.TSCurrentAmount
+		new.Amount = limitFloat64ToDecimal(*data.TSCurrentAmount)
 	}
 	if data.TSCurrentTotalCost != nil && *data.TSCurrentTotalCost > 0 {
-		new.CurrentTotalCost = *data.TSCurrentTotalCost
+		new.CurrentTotalCost = limitFloat64ToDecimal(*data.TSCurrentTotalCost)
 	}
 	if data.TSCurrentAvgBuyPrice != nil && *data.TSCurrentAvgBuyPrice > 0 {
-		new.AvgPrice = *data.TSCurrentAvgBuyPrice
+		new.AvgPrice = limitFloat64ToDecimal(*data.TSCurrentAvgBuyPrice)
 	}
 
 	// 设置首次建仓时间（如果还没有设置的话）
@@ -684,7 +747,7 @@ func (m *MigrationTable) convertHoldingWithStateToNew(data HoldingWithTokenState
 	}
 
 	// 设置tags - 可以根据业务逻辑添加
-	new.Tags = []string{}
+	new.Tags = pq.StringArray([]string{})
 
 	return new
 }
@@ -749,7 +812,7 @@ func (m *MigrationTable) migrateWalletTransaction(ctx context.Context) error {
 			if err := m.acquireToken(ctx); err != nil {
 				return err
 			}
-			m.transactionAsyncWriter.Submit(transaction)
+			m.transactionAsyncWriter.MustSubmit(transaction, utils.MergeHashKey(transaction.WalletAddress, transaction.TransactionTime))
 		}
 
 		processed += int64(len(oldTransactions))
@@ -795,28 +858,28 @@ func (m *MigrationTable) loadValidWalletAddresses() (map[string]bool, error) {
 func (m *MigrationTable) convertOldWalletTransactionToNew(old model.OldWalletTransaction) model.WalletTransaction {
 	new := model.WalletTransaction{
 		WalletAddress:            utils.ChecksumAddress(old.WalletAddress, old.Chain),
-		WalletBalance:            old.WalletBalance,
+		WalletBalance:            limitFloat64ToDecimal(old.WalletBalance),
 		TokenAddress:             utils.ChecksumAddress(old.TokenAddress, old.Chain),
 		TokenIcon:                old.TokenIcon,
 		TokenName:                old.TokenName,
-		Price:                    old.Price,
-		Amount:                   old.Amount,
-		MarketCap:                old.MarketCap,
-		Value:                    old.Value,
-		HoldingPercentage:        old.HoldingPercentage,
+		Price:                    limitFloat64ToDecimal(old.Price),
+		Amount:                   limitFloat64ToDecimal(old.Amount),
+		MarketCap:                limitFloat64ToDecimal(old.MarketCap),
+		Value:                    limitFloat64ToDecimal(old.Value),
+		HoldingPercentage:        limitFloat64ToDecimal(old.HoldingPercentage),
 		ChainID:                  old.ChainID,
-		RealizedProfit:           old.RealizedProfit,
-		RealizedProfitPercentage: old.RealizedProfitPercentage,
+		RealizedProfit:           limitFloat64ToDecimal(old.RealizedProfit),
+		RealizedProfitPercentage: limitFloat64ToDecimal(old.RealizedProfitPercentage),
 		TransactionType:          old.TransactionType,
-		TransactionTime:          old.TransactionTime,
+		TransactionTime:          old.TransactionTime * 1000,
 		Signature:                old.Signature,
 		FromTokenAddress:         utils.ChecksumAddress(old.FromTokenAddress, old.Chain),
 		FromTokenSymbol:          old.FromTokenSymbol,
-		FromTokenAmount:          old.FromTokenAmount,
+		FromTokenAmount:          limitFloat64ToDecimal(old.FromTokenAmount),
 		DestTokenAddress:         utils.ChecksumAddress(old.DestTokenAddress, old.Chain),
 		DestTokenSymbol:          old.DestTokenSymbol,
-		DestTokenAmount:          old.DestTokenAmount,
-		Time:                     old.Time,
+		DestTokenAmount:          limitFloat64ToDecimal(old.DestTokenAmount),
+		CreatedAt:                old.Time.UnixMilli(),
 	}
 
 	return new

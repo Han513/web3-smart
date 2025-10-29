@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/md5"
 	"fmt"
-	"time"
 	"web3-smart/internal/worker/model"
 	"web3-smart/internal/worker/writer"
 	"web3-smart/pkg/elasticsearch"
@@ -31,40 +30,30 @@ func (w *ESWalletWriter) BWrite(ctx context.Context, wallets []model.WalletSumma
 		return nil
 	}
 
-	// 按wallet_address分组 - 使用具体的业务类型，更清晰
-	walletGroups := make(map[string][]model.WalletSummary)
-	for _, wallet := range wallets {
-		walletAddr := wallet.WalletAddress
-		walletGroups[walletAddr] = append(walletGroups[walletAddr], wallet)
+	// 对所有wallet数据应用精度限制
+	for i := range wallets {
+		limitWalletPrecision(&wallets[i])
 	}
 
-	// 并发处理不同wallet的数据
-	errChan := make(chan error, len(walletGroups))
-	for walletAddr, group := range walletGroups {
-		go func(address string, walletGroup []model.WalletSummary) {
-			if err := w.writeBulkOperations(ctx, address, walletGroup); err != nil {
-				errChan <- err
-				return
-			}
-			errChan <- nil
-		}(walletAddr, group)
-	}
-
-	// 等待所有写入完成
-	var lastErr error
-	for i := 0; i < len(walletGroups); i++ {
-		if err := <-errChan; err != nil {
-			lastErr = err
+	// 尝试3次写入
+	var err error
+	for i := 0; i < RETRY_COUNT; i++ {
+		err = w.writeBulkOperations(ctx, wallets)
+		if err == nil {
+			break
 		}
 	}
 
-	close(errChan)
+	if err != nil {
+		w.logger.Warn("❌ ES write failed, exceeded the maximum number of retries", zap.Error(err), zap.Any("wallets", wallets))
+		return err
+	}
 
-	return lastErr
+	return nil
 }
 
 // writeBulkOperations 构建并执行批量操作
-func (w *ESWalletWriter) writeBulkOperations(ctx context.Context, walletAddress string, wallets []model.WalletSummary) error {
+func (w *ESWalletWriter) writeBulkOperations(ctx context.Context, wallets []model.WalletSummary) error {
 	operations := make([]elasticsearch.BulkOperation, 0, len(wallets))
 
 	for _, wallet := range wallets {
@@ -79,7 +68,7 @@ func (w *ESWalletWriter) writeBulkOperations(ctx context.Context, walletAddress 
 			Action:   "index", // 使用index操作（存在则更新，不存在则创建）
 			Index:    w.index,
 			ID:       docID,
-			Routing:  walletAddress, // 使用wallet_address作为routing
+			Routing:  wallet.WalletAddress, // 使用wallet_address作为routing
 			Document: doc,
 		}
 
@@ -123,22 +112,25 @@ func (w *ESWalletWriter) convertToESDoc(wallet *model.WalletSummary) map[string]
 		"token_list":           wallet.TokenList,
 
 		// 交易数据 - 30天
-		"avg_cost_30d": wallet.AvgCost30d,
-		"buy_num_30d":  wallet.BuyNum30d,
-		"sell_num_30d": wallet.SellNum30d,
-		"win_rate_30d": wallet.WinRate30d,
+		"avg_cost_30d":  wallet.AvgCost30d,
+		"total_num_30d": wallet.BuyNum30d + wallet.SellNum30d,
+		"buy_num_30d":   wallet.BuyNum30d,
+		"sell_num_30d":  wallet.SellNum30d,
+		"win_rate_30d":  wallet.WinRate30d,
 
 		// 交易数据 - 7天
-		"avg_cost_7d": wallet.AvgCost7d,
-		"buy_num_7d":  wallet.BuyNum7d,
-		"sell_num_7d": wallet.SellNum7d,
-		"win_rate_7d": wallet.WinRate7d,
+		"avg_cost_7d":  wallet.AvgCost7d,
+		"total_num_7d": wallet.BuyNum7d + wallet.SellNum7d,
+		"buy_num_7d":   wallet.BuyNum7d,
+		"sell_num_7d":  wallet.SellNum7d,
+		"win_rate_7d":  wallet.WinRate7d,
 
 		// 交易数据 - 1天
-		"avg_cost_1d": wallet.AvgCost1d,
-		"buy_num_1d":  wallet.BuyNum1d,
-		"sell_num_1d": wallet.SellNum1d,
-		"win_rate_1d": wallet.WinRate1d,
+		"avg_cost_1d":  wallet.AvgCost1d,
+		"total_num_1d": wallet.BuyNum1d + wallet.SellNum1d,
+		"buy_num_1d":   wallet.BuyNum1d,
+		"sell_num_1d":  wallet.SellNum1d,
+		"win_rate_1d":  wallet.WinRate1d,
 
 		// 盈亏数据 - 30天
 		"pnl_30d":                 wallet.PNL30d,
@@ -192,9 +184,9 @@ func (w *ESWalletWriter) convertToESDoc(wallet *model.WalletSummary) map[string]
 		"created_at": wallet.CreatedAt,
 	}
 
-	// 处理时间戳字段
+	// 时间字段已经是毫秒时间戳(int64)，可直接使用
 	if wallet.LastTransactionTime > 0 {
-		doc["last_transaction_time"] = time.UnixMilli(wallet.LastTransactionTime * 1000)
+		doc["last_transaction_time"] = wallet.LastTransactionTime
 	}
 
 	return doc
@@ -204,70 +196,70 @@ func (w *ESWalletWriter) convertToESDoc(wallet *model.WalletSummary) map[string]
 func (w *ESWalletWriter) generateCombinedTags(wallet *model.WalletSummary) []string {
 	var combined []string
 
-	// 添加基础状态标签
-	if wallet.IsActive {
-		combined = append(combined, "active")
-	} else {
-		combined = append(combined, "inactive")
-	}
+	// // 添加基础状态标签
+	// if wallet.IsActive {
+	// 	combined = append(combined, "active")
+	// } else {
+	// 	combined = append(combined, "inactive")
+	// }
 
-	// 添加钱包类型标签
-	switch wallet.WalletType {
-	case 0:
-		combined = append(combined, "general_smart_money")
-	case 1:
-		combined = append(combined, "pump_smart_money")
-	case 2:
-		combined = append(combined, "moonshot_smart_money")
-	}
+	// // 添加钱包类型标签
+	// switch wallet.WalletType {
+	// case 0:
+	// 	combined = append(combined, "general_smart_money")
+	// case 1:
+	// 	combined = append(combined, "pump_smart_money")
+	// case 2:
+	// 	combined = append(combined, "moonshot_smart_money")
+	// }
 
-	// 添加资产倍数标签
-	if wallet.AssetMultiple >= 10 {
-		combined = append(combined, "high_performer")
-	} else if wallet.AssetMultiple >= 2 {
-		combined = append(combined, "good_performer")
-	} else if wallet.AssetMultiple >= 0 {
-		combined = append(combined, "break_even")
-	} else {
-		combined = append(combined, "loss_maker")
-	}
+	// // 添加资产倍数标签
+	// if wallet.AssetMultiple.GreaterThanOrEqual(decimal.NewFromInt(10)) {
+	// 	combined = append(combined, "high_performer")
+	// } else if wallet.AssetMultiple.GreaterThanOrEqual(decimal.NewFromInt(2)) {
+	// 	combined = append(combined, "good_performer")
+	// } else if wallet.AssetMultiple.GreaterThanOrEqual(decimal.Zero) {
+	// 	combined = append(combined, "break_even")
+	// } else {
+	// 	combined = append(combined, "loss_maker")
+	// }
 
-	// 添加余额区间标签
-	if wallet.BalanceUSD >= 1000000 {
-		combined = append(combined, "whale")
-	} else if wallet.BalanceUSD >= 100000 {
-		combined = append(combined, "big_holder")
-	} else if wallet.BalanceUSD >= 10000 {
-		combined = append(combined, "medium_holder")
-	} else {
-		combined = append(combined, "small_holder")
-	}
+	// // 添加余额区间标签
+	// if wallet.BalanceUSD.GreaterThanOrEqual(decimal.NewFromInt(1000000)) {
+	// 	combined = append(combined, "whale")
+	// } else if wallet.BalanceUSD.GreaterThanOrEqual(decimal.NewFromInt(100000)) {
+	// 	combined = append(combined, "big_holder")
+	// } else if wallet.BalanceUSD.GreaterThanOrEqual(decimal.NewFromInt(10000)) {
+	// 	combined = append(combined, "medium_holder")
+	// } else {
+	// 	combined = append(combined, "small_holder")
+	// }
 
-	// 添加交易活跃度标签 (基于30天交易次数)
-	totalTrades30d := wallet.BuyNum30d + wallet.SellNum30d
-	if totalTrades30d >= 100 {
-		combined = append(combined, "very_active_trader")
-	} else if totalTrades30d >= 20 {
-		combined = append(combined, "active_trader")
-	} else if totalTrades30d >= 5 {
-		combined = append(combined, "regular_trader")
-	} else {
-		combined = append(combined, "low_activity_trader")
-	}
+	// // 添加交易活跃度标签 (基于30天交易次数)
+	// totalTrades30d := wallet.BuyNum30d + wallet.SellNum30d
+	// if totalTrades30d >= 100 {
+	// 	combined = append(combined, "very_active_trader")
+	// } else if totalTrades30d >= 20 {
+	// 	combined = append(combined, "active_trader")
+	// } else if totalTrades30d >= 5 {
+	// 	combined = append(combined, "regular_trader")
+	// } else {
+	// 	combined = append(combined, "low_activity_trader")
+	// }
 
-	// 添加胜率标签 (基于30天胜率)
-	if wallet.WinRate30d >= 0.8 {
-		combined = append(combined, "high_win_rate")
-	} else if wallet.WinRate30d >= 0.6 {
-		combined = append(combined, "good_win_rate")
-	} else if wallet.WinRate30d >= 0.4 {
-		combined = append(combined, "average_win_rate")
-	} else {
-		combined = append(combined, "low_win_rate")
-	}
+	// // 添加胜率标签 (基于30天胜率)
+	// if wallet.WinRate30d.GreaterThanOrEqual(decimal.NewFromFloat(0.8)) {
+	// 	combined = append(combined, "high_win_rate")
+	// } else if wallet.WinRate30d.GreaterThanOrEqual(decimal.NewFromFloat(0.6)) {
+	// 	combined = append(combined, "good_win_rate")
+	// } else if wallet.WinRate30d.GreaterThanOrEqual(decimal.NewFromFloat(0.4)) {
+	// 	combined = append(combined, "average_win_rate")
+	// } else {
+	// 	combined = append(combined, "low_win_rate")
+	// }
 
 	// 添加原始标签
-	combined = append(combined, wallet.Tags...)
+	combined = append(combined, []string(wallet.Tags)...)
 
 	return combined
 }

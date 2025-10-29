@@ -7,6 +7,7 @@ import (
 	"web3-smart/internal/worker/writer"
 	walletUtils "web3-smart/pkg/utils/wallet_utils"
 
+	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -15,6 +16,71 @@ import (
 const (
 	RETRY_COUNT = 3
 )
+
+// limitDecimal 限制decimal.Decimal值的范围，防止PostgreSQL DECIMAL(50,20)溢出
+func limitDecimal(value decimal.Decimal) decimal.Decimal {
+	// DECIMAL(50,20)的最大值和最小值 (30位整数 + 20位小数)
+	maxDecimal50_20, _ := decimal.NewFromString("999999999999999999999999999999.99999999999999999999")
+	minDecimal50_20 := maxDecimal50_20.Neg()
+
+	// 1. 先检查是否超过总体范围
+	if value.GreaterThan(maxDecimal50_20) {
+		return maxDecimal50_20
+	}
+	if value.LessThan(minDecimal50_20) {
+		return minDecimal50_20
+	}
+
+	// 2. 精度处理：四舍五入到20位小数
+	return value.Round(20)
+}
+
+// limitWalletPrecision 限制钱包数据中所有decimal.Decimal字段的精度
+func limitWalletPrecision(wallet *model.WalletSummary) {
+	wallet.Balance = limitDecimal(wallet.Balance)
+	wallet.BalanceUSD = limitDecimal(wallet.BalanceUSD)
+	wallet.AssetMultiple = limitDecimal(wallet.AssetMultiple)
+
+	// 交易数据
+	wallet.AvgCost30d = limitDecimal(wallet.AvgCost30d)
+	wallet.WinRate30d = limitDecimal(wallet.WinRate30d)
+	wallet.AvgCost7d = limitDecimal(wallet.AvgCost7d)
+	wallet.WinRate7d = limitDecimal(wallet.WinRate7d)
+	wallet.AvgCost1d = limitDecimal(wallet.AvgCost1d)
+	wallet.WinRate1d = limitDecimal(wallet.WinRate1d)
+
+	// 盈亏数据
+	wallet.PNL30d = limitDecimal(wallet.PNL30d)
+	wallet.PNLPercentage30d = limitDecimal(wallet.PNLPercentage30d)
+	wallet.UnrealizedProfit30d = limitDecimal(wallet.UnrealizedProfit30d)
+	wallet.TotalCost30d = limitDecimal(wallet.TotalCost30d)
+	wallet.AvgRealizedProfit30d = limitDecimal(wallet.AvgRealizedProfit30d)
+
+	wallet.PNL7d = limitDecimal(wallet.PNL7d)
+	wallet.PNLPercentage7d = limitDecimal(wallet.PNLPercentage7d)
+	wallet.UnrealizedProfit7d = limitDecimal(wallet.UnrealizedProfit7d)
+	wallet.TotalCost7d = limitDecimal(wallet.TotalCost7d)
+	wallet.AvgRealizedProfit7d = limitDecimal(wallet.AvgRealizedProfit7d)
+
+	wallet.PNL1d = limitDecimal(wallet.PNL1d)
+	wallet.PNLPercentage1d = limitDecimal(wallet.PNLPercentage1d)
+	wallet.UnrealizedProfit1d = limitDecimal(wallet.UnrealizedProfit1d)
+	wallet.TotalCost1d = limitDecimal(wallet.TotalCost1d)
+	wallet.AvgRealizedProfit1d = limitDecimal(wallet.AvgRealizedProfit1d)
+
+	// 收益分布百分比数据
+	wallet.DistributionGt500Percentage30d = limitDecimal(wallet.DistributionGt500Percentage30d)
+	wallet.Distribution200to500Percentage30d = limitDecimal(wallet.Distribution200to500Percentage30d)
+	wallet.Distribution0to200Percentage30d = limitDecimal(wallet.Distribution0to200Percentage30d)
+	wallet.DistributionN50to0Percentage30d = limitDecimal(wallet.DistributionN50to0Percentage30d)
+	wallet.DistributionLt50Percentage30d = limitDecimal(wallet.DistributionLt50Percentage30d)
+
+	wallet.DistributionGt500Percentage7d = limitDecimal(wallet.DistributionGt500Percentage7d)
+	wallet.Distribution200to500Percentage7d = limitDecimal(wallet.Distribution200to500Percentage7d)
+	wallet.Distribution0to200Percentage7d = limitDecimal(wallet.Distribution0to200Percentage7d)
+	wallet.DistributionN50to0Percentage7d = limitDecimal(wallet.DistributionN50to0Percentage7d)
+	wallet.DistributionLt50Percentage7d = limitDecimal(wallet.DistributionLt50Percentage7d)
+}
 
 type DbWalletWriter struct {
 	db *gorm.DB
@@ -28,6 +94,11 @@ func NewDbWalletWriter(db *gorm.DB, tl *zap.Logger) writer.BatchWriter[model.Wal
 func (w *DbWalletWriter) BWrite(ctx context.Context, wallets []model.WalletSummary) error {
 	if len(wallets) == 0 {
 		return nil
+	}
+
+	// 对所有wallet数据应用精度限制
+	for i := range wallets {
+		limitWalletPrecision(&wallets[i])
 	}
 
 	wallets = walletUtils.DeduplicateWallets(wallets)

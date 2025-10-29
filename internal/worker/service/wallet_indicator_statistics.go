@@ -27,17 +27,17 @@ type WalletIndicatorStatistics struct {
 	repo           repository.Repository
 	daoManager     *dao.DAOManager
 	walletDbWriter *writer.AsyncBatchWriter[model.WalletSummary]
-	//walletEsWriter *writer.AsyncBatchWriter[model.WalletSummary]
-	txDbWriter *writer.AsyncBatchWriter[model.WalletTransaction]
+	walletEsWriter *writer.AsyncBatchWriter[model.WalletSummary]
+	txDbWriter     *writer.AsyncBatchWriter[model.WalletTransaction]
 }
 
 func NewWalletIndicatorStatistics(cfg config.Config, logger *zap.Logger, repo repository.Repository) *WalletIndicatorStatistics {
-	walletDbWriter := writer.NewAsyncBatchWriter(logger, wallet.NewDbWalletWriter(repo.GetDB(), logger), 1000, 300*time.Millisecond, "wallet_db_writer", 3)
-	//walletEsWriter := writer.NewAsyncBatchWriter(logger, wallet.NewESWalletWriter(repo.GetElasticsearchClient(), logger, cfg.Elasticsearch.WalletsIndexName), 1000, 300*time.Millisecond, "wallet_es_writer", 3)
-	txDbWriter := writer.NewAsyncBatchWriter(logger, transaction.NewDbTransactionWriter(repo.GetDB(), logger), 1000, 300*time.Millisecond, "tx_db_writer", 3)
+	walletDbWriter := writer.NewAsyncBatchWriter(logger, wallet.NewDbWalletWriter(repo.GetDB(), logger), 1000, 300*time.Millisecond, "wallet_db_writer", 1)
+	walletEsWriter := writer.NewAsyncBatchWriter(logger, wallet.NewESWalletWriter(repo.GetElasticsearchClient(), logger, cfg.Elasticsearch.WalletsIndexName), 1000, 300*time.Millisecond, "wallet_es_writer", 1)
+	txDbWriter := writer.NewAsyncBatchWriter(logger, transaction.NewDbTransactionWriter(repo.GetDB(), logger), 1000, 300*time.Millisecond, "tx_db_writer", 1)
 	// 初始化后立即启动所有的 AsyncBatchWriter
 	walletDbWriter.Start(context.Background())
-	//walletEsWriter.Start(context.Background())
+	walletEsWriter.Start(context.Background())
 	txDbWriter.Start(context.Background())
 
 	return &WalletIndicatorStatistics{
@@ -46,8 +46,8 @@ func NewWalletIndicatorStatistics(cfg config.Config, logger *zap.Logger, repo re
 		repo:           repo,
 		daoManager:     repo.GetDAOManager(),
 		walletDbWriter: walletDbWriter,
-		//walletEsWriter: walletEsWriter,
-		txDbWriter: txDbWriter,
+		walletEsWriter: walletEsWriter,
+		txDbWriter:     txDbWriter,
 	}
 }
 
@@ -60,8 +60,8 @@ func (s *WalletIndicatorStatistics) Statistics(trade model.TradeEvent, smartMone
 	// 通过链上获取钱包native token余额
 	nativeBalance, walletBalanceUsd, err := s.getWalletBalance(ctx, smartMoney)
 	if err == nil {
-		smartMoney.Balance = nativeBalance
-		smartMoney.BalanceUSD = walletBalanceUsd
+		smartMoney.Balance = decimal.NewFromFloat(nativeBalance)
+		smartMoney.BalanceUSD = decimal.NewFromFloat(walletBalanceUsd)
 	}
 
 	switch txType {
@@ -89,9 +89,10 @@ func (s *WalletIndicatorStatistics) Statistics(trade model.TradeEvent, smartMone
 	// 更新tx表
 	tx := model.NewWalletTransaction(trade, smartMoney, updatedHolding, txType, fromTokenInfo, toTokenInfo)
 
-	s.walletDbWriter.Submit(*smartMoney)
-	//s.walletEsWriter.Submit(*smartMoney)
-	s.txDbWriter.Submit(*tx)
+	hashKey := utils.MergeHashKey(trade.Event.TokenAddress, trade.Event.Time)
+	s.walletDbWriter.Submit(*smartMoney, hashKey)
+	s.walletEsWriter.Submit(*smartMoney, hashKey)
+	s.txDbWriter.Submit(*tx, hashKey)
 
 	// 更新wallet缓存
 	s.daoManager.WalletDAO.UpdateWalletCache(ctx, utils.WalletSummaryKey(smartMoney.ChainID, smartMoney.WalletAddress), smartMoney)

@@ -23,7 +23,6 @@ type EventDetails struct {
 	FromTokenAmount float64 `json:"fromTokenAmount"`
 	ToTokenAmount   float64 `json:"toTokenAmount"`
 	Address         string  `json:"address"`
-	Hash            string  `json:"hash"`
 	Price           float64 `json:"price"`
 	PriceNav        float64 `json:"priceNav"`
 	Source          string  `json:"source"`
@@ -34,4 +33,12 @@ type EventDetails struct {
 	QuoteMint    string  `json:"quote_mint"`
 	BaseBalance  float64 `json:"base_balance"`
 	QuoteBalance float64 `json:"quote_balance"`
+
+	BlockNumber   uint64   `json:"blockNumber"`
+	Hash          string   `json:"hash"`
+	TxIndex       *uint64  `json:"txIndex,omitempty"`
+	LogIndex      *int32   `json:"logIndex,omitempty"`
+	InsIndex      *int32   `json:"insIndex,omitempty"`
+	InnerInsIndex *int32   `json:"innerInsIndex,omitempty"`
+	CurveProcess  *float64 `json:"curveProcess,omitempty"` // 使用指针 + omitempty 表示可选字段
 }

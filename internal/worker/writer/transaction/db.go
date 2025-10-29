@@ -7,6 +7,7 @@ import (
 	"web3-smart/internal/worker/writer"
 	transactionUtils "web3-smart/pkg/utils/transaction_utils"
 
+	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -15,6 +16,38 @@ import (
 const (
 	RETRY_COUNT = 3
 )
+
+// limitDecimal 限制decimal.Decimal值的范围，防止PostgreSQL DECIMAL(50,20)溢出
+func limitDecimal(value decimal.Decimal) decimal.Decimal {
+	// DECIMAL(50,20)的最大值和最小值 (30位整数 + 20位小数)
+	maxDecimal50_20, _ := decimal.NewFromString("999999999999999999999999999999.99999999999999999999")
+	minDecimal50_20 := maxDecimal50_20.Neg()
+
+	// 1. 先检查是否超过总体范围
+	if value.GreaterThan(maxDecimal50_20) {
+		return maxDecimal50_20
+	}
+	if value.LessThan(minDecimal50_20) {
+		return minDecimal50_20
+	}
+
+	// 2. 精度处理：四舍五入到20位小数
+	return value.Round(20)
+}
+
+// limitTransactionPrecision 限制钱包交易数据中所有decimal.Decimal字段的精度
+func limitTransactionPrecision(transaction *model.WalletTransaction) {
+	transaction.WalletBalance = limitDecimal(transaction.WalletBalance)
+	transaction.Price = limitDecimal(transaction.Price)
+	transaction.Amount = limitDecimal(transaction.Amount)
+	transaction.MarketCap = limitDecimal(transaction.MarketCap)
+	transaction.Value = limitDecimal(transaction.Value)
+	transaction.HoldingPercentage = limitDecimal(transaction.HoldingPercentage)
+	transaction.RealizedProfit = limitDecimal(transaction.RealizedProfit)
+	transaction.RealizedProfitPercentage = limitDecimal(transaction.RealizedProfitPercentage)
+	transaction.FromTokenAmount = limitDecimal(transaction.FromTokenAmount)
+	transaction.DestTokenAmount = limitDecimal(transaction.DestTokenAmount)
+}
 
 type DbTransactionWriter struct {
 	db *gorm.DB
@@ -28,6 +61,11 @@ func NewDbTransactionWriter(db *gorm.DB, tl *zap.Logger) writer.BatchWriter[mode
 func (w *DbTransactionWriter) BWrite(ctx context.Context, transactions []model.WalletTransaction) error {
 	if len(transactions) == 0 {
 		return nil
+	}
+
+	// 对所有transaction数据应用精度限制
+	for i := range transactions {
+		limitTransactionPrecision(&transactions[i])
 	}
 
 	transactions = transactionUtils.DeduplicateTransactions(transactions)
@@ -46,6 +84,7 @@ func (w *DbTransactionWriter) BWrite(ctx context.Context, transactions []model.W
 				{Name: "wallet_address"},
 				{Name: "token_address"},
 				{Name: "signature"},
+				{Name: "log_index"},
 				{Name: "transaction_time"},
 				{Name: "chain_id"},
 			},

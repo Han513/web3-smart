@@ -2,10 +2,12 @@ package writer
 
 import (
 	"context"
-	"go.uber.org/zap"
 	"sync"
 	"time"
 	"web3-smart/internal/worker/monitor"
+	"web3-smart/pkg/utils"
+
+	"go.uber.org/zap"
 )
 
 type AsyncBatchWriter[T any] struct {
@@ -13,32 +15,41 @@ type AsyncBatchWriter[T any] struct {
 	workers       int
 	tl            *zap.Logger
 	writer        BatchWriter[T]
-	inputChan     chan T
+	inputChans    []chan T
 	wg            sync.WaitGroup
 	batchSize     int
 	flushInterval time.Duration
 }
 
 func NewAsyncBatchWriter[T any](tl *zap.Logger, writer BatchWriter[T], batchSize int, flushInterval time.Duration, id string, workers int) *AsyncBatchWriter[T] {
-	return &AsyncBatchWriter[T]{
+	a := &AsyncBatchWriter[T]{
 		id:            id,
 		workers:       workers,
 		tl:            tl,
 		writer:        writer,
-		inputChan:     make(chan T, 10000),
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
 	}
+
+	a.inputChans = make([]chan T, workers)
+
+	chanSize := 2000
+	for i := 0; i < workers; i++ {
+		a.inputChans[i] = make(chan T, chanSize)
+	}
+
+	return a
 }
 
 func (b *AsyncBatchWriter[T]) Start(ctx context.Context) {
 	for i := 0; i < b.workers; i++ {
 		b.wg.Add(1)
-		go b.processItems(ctx)
+		workerID := i
+		go b.processItems(ctx, workerID)
 	}
 }
 
-func (b *AsyncBatchWriter[T]) processItems(ctx context.Context) {
+func (b *AsyncBatchWriter[T]) processItems(ctx context.Context, workerID int) {
 	defer b.wg.Done()
 	ticker := time.NewTicker(b.flushInterval)
 	defer ticker.Stop()
@@ -51,7 +62,7 @@ func (b *AsyncBatchWriter[T]) processItems(ctx context.Context) {
 				b.writeAndRecord(ctx, batch)
 			}
 			return
-		case item, ok := <-b.inputChan:
+		case item, ok := <-b.inputChans[workerID]:
 			if !ok {
 				return
 			}
@@ -89,10 +100,13 @@ func (b *AsyncBatchWriter[T]) writeAndRecord(ctx context.Context, batch []T) {
 	monitor.AsyncWriterFlushCount.WithLabelValues(b.id).Inc()
 }
 
-func (b *AsyncBatchWriter[T]) Submit(item T) {
+// Submit 非阻塞
+func (b *AsyncBatchWriter[T]) Submit(item T, hashKey string) {
+	idx := utils.GetHashBucket(hashKey, uint32(b.workers))
+
 	for {
 		select {
-		case b.inputChan <- item:
+		case b.inputChans[idx] <- item:
 			return
 		default:
 			b.tl.Warn("Batch input channel submit timeout, dropping item", zap.String("id", b.id))
@@ -101,8 +115,16 @@ func (b *AsyncBatchWriter[T]) Submit(item T) {
 	}
 }
 
+// MustSubmit 通道满时阻塞提交
+func (b *AsyncBatchWriter[T]) MustSubmit(item T, hashKey string) {
+	idx := utils.GetHashBucket(hashKey, uint32(b.workers))
+	b.inputChans[idx] <- item
+}
+
 func (b *AsyncBatchWriter[T]) Close() {
-	close(b.inputChan)
+	for _, inputChan := range b.inputChans {
+		close(inputChan)
+	}
 	b.wg.Wait()
 	_ = b.writer.Close()
 }

@@ -3,6 +3,7 @@ package repository
 import (
 	"web3-smart/internal/worker/dao"
 	"web3-smart/pkg/elasticsearch"
+	selectdbclient "web3-smart/pkg/selectdb_client"
 
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -23,6 +24,7 @@ type Repository interface {
 	GetDB() DBClient
 	GetMQ() MQClient
 	GetSelectDB() DBClient
+	GetSelectDBHttp() *selectdbclient.Client
 	GetElasticsearchClient() *elasticsearch.Client
 	GetBscClient() *ethclient.Client
 	GetSolanaClient() *rpc.Client

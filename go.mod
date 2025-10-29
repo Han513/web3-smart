@@ -70,6 +70,7 @@ require (
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
+	github.com/lib/pq v1.10.9 // indirect
 	github.com/logrusorgru/aurora v2.0.3+incompatible // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -104,12 +105,14 @@ require (
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
 	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/exp v0.0.0-20230626212559-97b1e661b5df // indirect
+	golang.org/x/net v0.38.0 // indirect
 	golang.org/x/sync v0.13.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/term v0.31.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 	google.golang.org/protobuf v1.36.5 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	resty.dev/v3 v3.0.0-beta.3 // indirect
 )
 
 replace gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker => gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker.git v0.2.5
