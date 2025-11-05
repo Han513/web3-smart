@@ -156,8 +156,8 @@ func (h *holdingDAO) GetByChainAndWallet(ctx context.Context, chainID uint64, wa
 // GetActiveHoldings 获取未清仓的持仓信息
 func (h *holdingDAO) GetActiveHoldings(ctx context.Context, walletAddress string) ([]*model.WalletHolding, error) {
 	var holdings []*model.WalletHolding
-	err := h.db.WithContext(ctx).
-		Where("wallet_address = ? AND is_cleared = ?", walletAddress, false).
+    err := h.db.WithContext(ctx).
+        Where("wallet_address = ? AND amount > 0", walletAddress).
 		Order("updated_at DESC").
 		Find(&holdings).Error
 

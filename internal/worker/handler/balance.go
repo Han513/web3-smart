@@ -29,13 +29,16 @@ func NewBalanceHandler(cfg config.Config, logger *zap.Logger, repo repository.Re
 }
 
 func (h *BalanceHandler) HandleBalance(ctx context.Context, blockBalance model.BlockBalance) {
+	if blockBalance.Hash == "" && len(blockBalance.Balances) == 0 {
+		return
+	}
 	ctx, span := logger.StartSpan(ctx, "block_balance", blockBalance.Hash)
 	defer span.End()
 	tl := logger.NewLoggerWithTrace(ctx, h.logger)
 	tl.Info("HandlerBalance start", zap.String("Hash", blockBalance.Hash), zap.Int("len balances", len(blockBalance.Balances)))
 	start := time.Now()
 	defer func() {
-		tl.Info("HandlerBalance end", zap.String("Hash", blockBalance.Hash), zap.Int("len balances", len(blockBalance.Balances)), zap.Duration("cost", time.Since(start)))
+		tl.Info("HandlerBalance end", zap.String("Hash", blockBalance.Hash), zap.Int("len balances", len(blockBalance.Balances)), zap.Float64("cost", time.Since(start).Seconds()))
 	}()
 	h.balanceService.UpdateBalance(blockBalance)
 }

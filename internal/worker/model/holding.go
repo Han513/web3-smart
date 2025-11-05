@@ -31,7 +31,6 @@ type WalletHolding struct {
 	AvgPrice          decimal.Decimal `gorm:"column:avg_price;type:decimal(50,20);not null;default:0" json:"avg_price"`                   // 平均买入价USD
 	CurrentTotalCost  decimal.Decimal `gorm:"column:current_total_cost;type:decimal(50,20);not null;default:0" json:"current_total_cost"` // 当前持仓总花费成本USD
 	MarketCap         decimal.Decimal `gorm:"column:marketcap;type:decimal(50,20);not null;default:0" json:"marketcap"`                   // 买入/卖出时的市值USD
-	IsCleared         bool            `gorm:"column:is_cleared;type:boolean;not null;default:false" json:"is_cleared"`                    // 是否已清仓
 	IsDev             bool            `gorm:"column:is_dev;type:boolean;not null;default:false" json:"is_dev"`                            // 是否是该token dev
 	Tags              pq.StringArray  `gorm:"column:tags;type:varchar(50)[]" json:"tags"`                                                 // smart money, sniper...
 
@@ -114,12 +113,11 @@ func (w *WalletHolding) AggregateTrade(trade TradeEvent, tokenInfo SmTokenRet, i
 			w.CurrentTotalCost = decimal.Zero
 			w.AvgPrice = decimal.Zero
 			w.UnrealizedProfits = decimal.Zero
-			w.IsCleared = false
 			txType = TX_TYPE_BUILD
 		}
-		tokenAmount := decimal.NewFromFloat(trade.Event.ToTokenAmount)
-		price := decimal.NewFromFloat(trade.Event.Price)
-		volumeUsd := decimal.NewFromFloat(trade.Event.VolumeUsd)
+        tokenAmount := decimal.NewFromFloat(trade.Event.ToTokenAmount)
+        price := decimal.NewFromFloat(trade.Event.Price)
+        volumeUsd := decimal.NewFromFloat(trade.Event.VolumeUsd)
 
 		w.Amount = w.Amount.Add(tokenAmount)
 		w.ValueUSD = w.Amount.Mul(price)
@@ -129,7 +127,6 @@ func (w *WalletHolding) AggregateTrade(trade TradeEvent, tokenInfo SmTokenRet, i
 		}
 		w.MarketCap = marketCap
 		w.UnrealizedProfits = w.ValueUSD.Sub(w.CurrentTotalCost)
-		w.IsCleared = false
 
 		w.HistoricalBuyAmount = w.HistoricalBuyAmount.Add(tokenAmount)
 		w.HistoricalBuyCost = w.HistoricalBuyCost.Add(volumeUsd)
@@ -140,8 +137,7 @@ func (w *WalletHolding) AggregateTrade(trade TradeEvent, tokenInfo SmTokenRet, i
 		// pnl = 卖出价值USD - 卖出数量 * 平均买入价
 		sellAmount := decimal.NewFromFloat(trade.Event.FromTokenAmount)
 		sellValueUSD := decimal.NewFromFloat(trade.Event.VolumeUsd)
-		price := decimal.NewFromFloat(trade.Event.Price)
-		volumeUsd := decimal.NewFromFloat(trade.Event.VolumeUsd)
+        price := decimal.NewFromFloat(trade.Event.Price)
 
 		pnlDelta := sellValueUSD.Sub(sellAmount.Mul(w.AvgPrice))
 		w.PNL = w.PNL.Add(pnlDelta)
@@ -152,15 +148,18 @@ func (w *WalletHolding) AggregateTrade(trade TradeEvent, tokenInfo SmTokenRet, i
 
 		w.Amount = w.Amount.Sub(sellAmount)
 		w.ValueUSD = w.Amount.Mul(price)
-		w.CurrentTotalCost = w.CurrentTotalCost.Sub(volumeUsd)
+		// 使用成本基礎扣減，而非成交金額，避免均價被錯誤拉低/拉高
+		costBasis := w.AvgPrice.Mul(sellAmount)
+		w.CurrentTotalCost = w.CurrentTotalCost.Sub(costBasis)
+		if w.CurrentTotalCost.LessThan(decimal.NewFromFloat(0)) && w.CurrentTotalCost.GreaterThan(decimal.NewFromFloat(-1e-9)) {
+			w.CurrentTotalCost = decimal.Zero
+		}
 		if w.Amount.GreaterThan(decimal.Zero) {
 			w.AvgPrice = w.CurrentTotalCost.Div(w.Amount)
 		}
 		w.MarketCap = marketCap
 		w.UnrealizedProfits = w.ValueUSD.Sub(w.CurrentTotalCost)
-		w.IsCleared = false
 		if w.Amount.LessThanOrEqual(decimal.Zero) {
-			w.IsCleared = true
 			w.Amount = decimal.Zero
 			w.ValueUSD = decimal.Zero
 			w.CurrentTotalCost = decimal.Zero
@@ -180,7 +179,6 @@ func (w *WalletHolding) AggregateTrade(trade TradeEvent, tokenInfo SmTokenRet, i
 // ToESDocument converts WalletHolding to map with float64 values for ES indexing
 func (w *WalletHolding) ToESDocument() map[string]interface{} {
 	return map[string]interface{}{
-		"id":                     w.ID,
 		"chain_id":               w.ChainID,
 		"wallet_address":         w.WalletAddress,
 		"token_address":          w.TokenAddress,
@@ -194,7 +192,6 @@ func (w *WalletHolding) ToESDocument() map[string]interface{} {
 		"avg_price":              w.AvgPrice.InexactFloat64(),
 		"current_total_cost":     w.CurrentTotalCost.InexactFloat64(),
 		"marketcap":              w.MarketCap.InexactFloat64(),
-		"is_cleared":             w.IsCleared,
 		"is_dev":                 w.IsDev,
 		"tags":                   w.Tags,
 		"historical_buy_amount":  w.HistoricalBuyAmount.InexactFloat64(),
@@ -239,7 +236,6 @@ func (w *WalletHolding) ToESIndex() map[string]interface{} {
 				"avg_price":              map[string]interface{}{"type": "double"},
 				"current_total_cost":     map[string]interface{}{"type": "double"},
 				"marketcap":              map[string]interface{}{"type": "double"},
-				"is_cleared":             map[string]interface{}{"type": "boolean"},
 				"is_dev":                 map[string]interface{}{"type": "boolean"},
 				"tags":                   map[string]interface{}{"type": "keyword"},
 				"wallet_tags_combined":   map[string]interface{}{"type": "keyword"},

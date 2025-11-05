@@ -56,7 +56,7 @@ func (m *MoralisClient) GetEvmTokenHolders(ctx context.Context, network string, 
 			if err == nil {
 				break
 			}
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(500 * time.Millisecond)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("fetch evm token holders failed, url: %s, error: %v", url, err)
@@ -66,7 +66,7 @@ func (m *MoralisClient) GetEvmTokenHolders(ctx context.Context, network string, 
 		if cursor == "" || (tokenHolders.Page != 0 && tokenHolders.PageSize == 0) || tokenHolders.PageSize < 100 {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	return resp, nil

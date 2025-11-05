@@ -68,7 +68,7 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "async_writer_flush_duration_seconds",
 			Help:    "Time taken to flush a batch.",
-			Buckets: []float64{0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0},
+			Buckets: []float64{0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 3.0, 5.0},
 		},
 		[]string{"writer_id"},
 	)

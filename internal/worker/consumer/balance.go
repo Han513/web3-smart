@@ -29,7 +29,7 @@ func NewBalanceConsumer(conf config.Config, logger *zap.Logger, repo repository.
 	workerSize := conf.Worker.WorkerNum
 	buffers := make([]chan model.BlockBalance, workerSize)
 	for i := range workerSize {
-		buffers[i] = make(chan model.BlockBalance, 2000)
+		buffers[i] = make(chan model.BlockBalance, 200)
 	}
 
 	return &BalanceConsumer{

@@ -10,6 +10,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/patrickmn/go-cache"
 	"github.com/redis/go-redis/v9"
+	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
 
@@ -32,6 +33,47 @@ func NewTokenDAO(db *gorm.DB, rds *redis.Client) TokenDAO {
 
 // GetTokenInfo 获取代币信息（简化版本）
 func (t *tokenDAO) GetTokenInfo(ctx context.Context, chainID uint64, tokenAddress string) (*model.SmTokenRet, error) {
+	// 如果是BNB和SOL，直接返回固定信息
+	switch chainID {
+	case 501:
+		// 僅對已知的 SOL/wSOL 特殊地址做快捷返回；其他地址走資料庫/快取
+		if tokenAddress == "So11111111111111111111111111111111111111111" { // SOL 合約地址
+			tokenInfo := &model.SmTokenRet{
+				Address: tokenAddress,
+				Name:    "SOLANA",
+				Symbol:  "SOL",
+				Logo:    "https://uploads.bydfi.in/logo/20250921082428_615.png",
+			}
+			totalSupply := decimal.NewFromFloat(549820000)
+			tokenInfo.Supply = &totalSupply
+			return tokenInfo, nil
+		}
+		if tokenAddress == "So11111111111111111111111111111111111111112" { // wSOL 合約地址
+			tokenInfo := &model.SmTokenRet{
+				Address: tokenAddress,
+				Name:    "Wrapped SOL",
+				Symbol:  "WSOL",
+				Logo:    "https://uploads.bydfi.in/logo/20250921082428_615.png",
+			}
+			totalSupply := decimal.NewFromFloat(12991751.535377756)
+			tokenInfo.Supply = &totalSupply
+			return tokenInfo, nil
+		}
+	case 9006:
+		tokenInfo := &model.SmTokenRet{
+			Address: tokenAddress,
+			Name:    "Wrapped BNB",
+			Symbol:  "WBNB",
+			Logo:    "https://uploads.bydfi.in/logo/20250921092521_136.png",
+		}
+
+		if tokenAddress == "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c" {
+			totalSupply := decimal.NewFromFloat(1294219.5681700353)
+			tokenInfo.Supply = &totalSupply
+			return tokenInfo, nil
+		}
+	}
+
 	cacheKey := utils.TokenInfoKey(chainID, tokenAddress)
 
 	// 先查本地缓存
@@ -59,8 +101,8 @@ func (t *tokenDAO) GetTokenInfo(ctx context.Context, chainID uint64, tokenAddres
 	// 查数据库
 	var tokenInfo model.SmTokenRet
 	err = t.db.WithContext(ctx).
-		Table("dex_query_v1.tokens").
-		Select("address, name, symbol, supply, creater, logo").
+		Table("dex_query_v1.web3_tokens").
+		Select("address, name, symbol, total_supply as supply, contract_info->>'creator' AS creater, logo").
 		Where("chain_id = ? AND address = ?", chainID, tokenAddress).
 		First(&tokenInfo).Error
 

@@ -71,6 +71,7 @@ func (b *AsyncBatchWriter[T]) processItems(ctx context.Context, workerID int) {
 				b.writeAndRecord(ctx, batch)
 				batch = make([]T, 0, b.batchSize)
 			}
+			ticker.Reset(b.flushInterval) // 重置ticker 避免出现小数据提交
 		case <-ticker.C:
 			if len(batch) > 0 {
 				b.writeAndRecord(ctx, batch)

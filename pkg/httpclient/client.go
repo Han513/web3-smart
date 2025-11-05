@@ -37,7 +37,7 @@ func NewHTTPClient(cfg HTTPClientConfig, logger *zap.Logger) *HTTPClient {
 		cfg.MaxRetries = 3
 	}
 	ratePerSecond := float64(cfg.RateLimit) / 60
-	limiter := rate.NewLimiter(rate.Limit(ratePerSecond), 1)
+	limiter := rate.NewLimiter(rate.Limit(ratePerSecond), int(ratePerSecond))
 
 	// 创建 Resty 客户端
 	restyClient := resty.New().

@@ -90,9 +90,17 @@ func NewWalletTransaction(
 		}
 
 		if tx.TokenAddress == trade.Event.BaseMint {
-			tx.updateTxTokenFromTo(trade.Event.QuoteMint, fromTokenInfo.Symbol, trade.Event.BaseMint, tx.TokenName)
+			symbol := ""
+			if fromTokenInfo != nil {
+				symbol = fromTokenInfo.Symbol
+			}
+			tx.updateTxTokenFromTo(trade.Event.BaseMint, symbol, trade.Event.QuoteMint, tx.TokenName)
 		} else {
-			tx.updateTxTokenFromTo(trade.Event.BaseMint, fromTokenInfo.Symbol, trade.Event.QuoteMint, tx.TokenName)
+			symbol := ""
+			if toTokenInfo != nil {
+				symbol = toTokenInfo.Symbol
+			}
+			tx.updateTxTokenFromTo(trade.Event.QuoteMint, symbol, trade.Event.BaseMint, tx.TokenName)
 		}
 	case TX_TYPE_SELL, TX_TYPE_CLEAN:
 		tx.Amount = decimal.NewFromFloat(trade.Event.FromTokenAmount)
@@ -102,15 +110,25 @@ func NewWalletTransaction(
 		}
 		priceDiff := decimal.NewFromFloat(trade.Event.Price).Sub(updatedHolding.AvgPrice)
 		tx.RealizedProfit = tx.Amount.Mul(priceDiff)
-		if updatedHolding.CurrentTotalCost.GreaterThan(decimal.Zero) {
-			tx.RealizedProfitPercentage = tx.RealizedProfit.Div(updatedHolding.CurrentTotalCost).Mul(decimal.NewFromInt(100))
+		// 百分比以「本次賣出成本」為分母：avg_price * sell_amount
+		costBasis := updatedHolding.AvgPrice.Mul(tx.Amount)
+		if costBasis.GreaterThan(decimal.Zero) {
+			tx.RealizedProfitPercentage = tx.RealizedProfit.Div(costBasis).Mul(decimal.NewFromInt(100))
 			tx.RealizedProfitPercentage = decimal.Max(decimal.NewFromFloat(-100), tx.RealizedProfitPercentage)
 		}
 
 		if tx.TokenAddress == trade.Event.BaseMint {
-			tx.updateTxTokenFromTo(trade.Event.BaseMint, tx.TokenName, trade.Event.QuoteMint, toTokenInfo.Symbol)
+			symbol := ""
+			if toTokenInfo != nil {
+				symbol = toTokenInfo.Symbol
+			}
+			tx.updateTxTokenFromTo(trade.Event.BaseMint, tx.TokenName, trade.Event.QuoteMint, symbol)
 		} else {
-			tx.updateTxTokenFromTo(trade.Event.QuoteMint, tx.TokenName, trade.Event.BaseMint, toTokenInfo.Symbol)
+			symbol := ""
+			if toTokenInfo != nil {
+				symbol = toTokenInfo.Symbol
+			}
+			tx.updateTxTokenFromTo(trade.Event.QuoteMint, tx.TokenName, trade.Event.BaseMint, symbol)
 		}
 	}
 

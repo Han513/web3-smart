@@ -675,7 +675,7 @@ func (m *MigrationTable) convertHoldingWithStateToNew(data HoldingWithTokenState
 		AvgPrice:          limitFloat64ToDecimal(data.HAvgPrice),
 		CurrentTotalCost:  limitFloat64ToDecimal(data.HCumulativeCost), // 映射字段名
 		MarketCap:         limitFloat64ToDecimal(data.HMarketCap),
-		IsCleared:         data.HIsCleared,
+    // is_cleared 已移除，不再映射
 		IsDev:             false, // 旧表没有这个字段，默认false
 
 		// 历史累计状态 - 默认值，会被TokenState数据覆盖

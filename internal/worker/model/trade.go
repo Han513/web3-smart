@@ -29,10 +29,10 @@ type EventDetails struct {
 	Timestamp       int64   `json:"timestamp"`
 
 	// ✅ 新增字段
-	BaseMint     string  `json:"base_mint"`
-	QuoteMint    string  `json:"quote_mint"`
-	BaseBalance  float64 `json:"base_balance"`
-	QuoteBalance float64 `json:"quote_balance"`
+	BaseMint     string  `json:"baseMint"`
+	QuoteMint    string  `json:"quoteMint"`
+	BaseBalance  float64 `json:"baseBalance"`
+	QuoteBalance float64 `json:"quoteBalance"`
 
 	BlockNumber   uint64   `json:"blockNumber"`
 	Hash          string   `json:"hash"`

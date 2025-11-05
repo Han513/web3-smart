@@ -38,7 +38,7 @@ func New(cfg config.Config, logger *zap.Logger) *Core {
 	scheduler.RegisterJob("transaction_cleanup", 1*time.Hour, transactionCleanup.Run)
 
 	tokenBalance := job.NewTokenBalance(cfg, repo, logger)
-	scheduler.RegisterJob("token_balance", 5*time.Minute, tokenBalance.Run)
+	scheduler.RegisterOnceJob("token_balance", tokenBalance.Run)
 
 	// 定時：聰明錢資料聚合更新（每 2 小時）
 	analyzer := job.NewSmartMoneyAnalyzer(repo, logger)
@@ -48,10 +48,6 @@ func New(cfg config.Config, logger *zap.Logger) *Core {
 	// 定時：聰明錢錢包分類器（每 6 小時）
 	classifier := job.NewSmartWalletClassifier(repo, logger)
 	scheduler.RegisterJob("smart_wallet_classifier", 6*time.Hour, classifier.Run)
-
-	// 定時：清理 30 天前舊交易（每天）
-	cleanup := job.NewCleanupJob(repo, logger)
-	scheduler.RegisterJob("cleanup_old_transactions", 24*time.Hour, cleanup.Run)
 
 	// 初始化消费者
 	consumers := []consumer.KafkaConsumer{

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"web3-smart/internal/worker/config"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/gagliardetto/solana-go"
 	rpcsol "github.com/gagliardetto/solana-go/rpc"
+	"github.com/lib/pq"
 	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -43,14 +46,16 @@ func (j *SmartMoneyAnalyzer) Run(ctx context.Context) error {
 	var esAsync *writer.AsyncBatchWriter[model.WalletSummary]
 	if esClient := j.repo.GetElasticsearchClient(); esClient != nil && j.Cfg.Elasticsearch.WalletsIndexName != "" {
 		esWriter := walletwriter.NewESWalletWriter(esClient, j.logger, j.Cfg.Elasticsearch.WalletsIndexName)
-		esAsync = writer.NewAsyncBatchWriter[model.WalletSummary](j.logger, esWriter, 1000, 300*time.Millisecond, "wallet_es_writer", 3)
+		// 提升 ES 批次、併發與 flush 頻率
+		esAsync = writer.NewAsyncBatchWriter[model.WalletSummary](j.logger, esWriter, 2000, 150*time.Millisecond, "wallet_es_writer", 8)
 		esAsync.Start(ctx)
 		defer esAsync.Close()
 	}
 
-	const pageSize = 500
-	var page int64 = 0
+	const pageSize = 800
+	const workersPerPage = 16
 	var processed int64 = 0
+	var lastID int64 = 0
 	start := time.Now()
 	j.logger.Info("smart_money_analyze start")
 
@@ -60,7 +65,8 @@ func (j *SmartMoneyAnalyzer) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 		var wallets []model.WalletSummary
-		tx := db.WithContext(ctx).Limit(pageSize).Offset(int(page * pageSize)).Order("id ASC").Find(&wallets)
+		// Keyset 分頁：避免大 Offset 退化
+		tx := db.WithContext(ctx).Where("id > ?", lastID).Limit(pageSize).Order("id ASC").Find(&wallets)
 		if tx.Error != nil {
 			return tx.Error
 		}
@@ -68,27 +74,61 @@ func (j *SmartMoneyAnalyzer) Run(ctx context.Context) error {
 			break
 		}
 
-		j.logger.Info("smart_money_analyze page fetched", zap.Int64("page", page), zap.Int("count", len(wallets)))
+		j.logger.Info("smart_money_analyze page fetched", zap.Int("count", len(wallets)), zap.Int64("since_processed", atomic.LoadInt64(&processed)))
 
-		for _, w := range wallets {
-			if esDoc, err := j.updateOneWallet(ctx, db, &w); err != nil {
-				j.logger.Error("update wallet failed", zap.String("wallet", w.WalletAddress), zap.Error(err))
-			} else if esAsync != nil && esDoc != nil {
-				esAsync.Submit(*esDoc, w.WalletAddress)
-			}
-			processed++
-			if processed%200 == 0 {
-				j.logger.Info("smart_money_analyze progress", zap.Int64("processed", processed), zap.Duration("elapsed", time.Since(start)))
-			}
-			if ctx.Err() != nil {
-				j.logger.Warn("smart_money_analyze cancelled mid-run", zap.Error(ctx.Err()))
-				return ctx.Err()
+		// 併發處理當前頁的錢包
+		jobs := make(chan *model.WalletSummary, len(wallets))
+		var wg sync.WaitGroup
+		worker := func() {
+			defer wg.Done()
+			for w := range jobs {
+				if esDoc, err := j.updateOneWallet(ctx, db, w); err != nil {
+					j.logger.Error("update wallet failed", zap.String("wallet", w.WalletAddress), zap.Error(err))
+				} else if esAsync != nil && esDoc != nil {
+					esAsync.Submit(*esDoc, w.WalletAddress)
+				}
+				n := atomic.AddInt64(&processed, 1)
+				if n%1000 == 0 {
+					j.logger.Info("smart_money_analyze progress", zap.Int64("processed", n), zap.Duration("elapsed", time.Since(start)))
+				}
+				if ctx.Err() != nil {
+					return
+				}
 			}
 		}
+		for i := 0; i < workersPerPage; i++ {
+			wg.Add(1)
+			go worker()
+		}
+		for i := range wallets {
+			jobs <- &wallets[i]
+		}
+		close(jobs)
+		wg.Wait()
 
-		page++
+		// 設定下一頁的起點
+		lastID = wallets[len(wallets)-1].ID
 	}
-	j.logger.Info("smart_money_analyze done", zap.Int64("processed", processed), zap.Duration("elapsed", time.Since(start)))
+	elapsed := time.Since(start)
+	var throughput float64
+	if elapsed > 0 {
+		throughput = float64(processed) / elapsed.Seconds()
+	}
+	var avgPerWalletMs float64
+	if processed > 0 {
+		avgPerWalletMs = float64(elapsed.Milliseconds()) / float64(processed)
+	}
+	// 觀察與 2 小時排程的關係
+	twoHours := 2 * time.Hour
+	percentOfTwoHours := (float64(elapsed) / float64(twoHours)) * 100
+	j.logger.Info(
+		"smart_money_analyze done",
+		zap.Int64("processed", processed),
+		zap.Duration("elapsed", elapsed),
+		zap.Float64("throughput_wallets_per_sec", throughput),
+		zap.Float64("avg_ms_per_wallet", avgPerWalletMs),
+		zap.Float64("elapsed_vs_2h_percent", percentOfTwoHours),
+	)
 	return nil
 }
 
@@ -114,7 +154,7 @@ func (j *SmartMoneyAnalyzer) getTokenPriceUSD(ctx context.Context, tokenAddress 
 	index := "web3_tokens"
 	res, err := es.SearchWithRouting(ctx, index, tokenAddress, query)
 	if err != nil {
-		j.logger.Warn("token price search failed", zap.String("token", tokenAddress), zap.Error(err))
+		j.logger.Debug("token price search failed", zap.String("token", tokenAddress), zap.Error(err))
 	}
 	if err != nil || len(res.Hits.Hits) == 0 {
 		if err == nil {
@@ -126,7 +166,7 @@ func (j *SmartMoneyAnalyzer) getTokenPriceUSD(ctx context.Context, tokenAddress 
 			return 0, err
 		}
 		if len(res.Hits.Hits) == 0 {
-			j.logger.Info("token price not found", zap.String("token", tokenAddress))
+			j.logger.Debug("token price not found", zap.String("token", tokenAddress))
 			return 0, fmt.Errorf("price not found")
 		}
 		j.logger.Debug("token price fetched without routing", zap.String("token", tokenAddress))
@@ -161,7 +201,7 @@ func (j *SmartMoneyAnalyzer) getTokenMeta(ctx context.Context, tokenAddress stri
 	index := "web3_tokens"
 	res, err := es.SearchWithRouting(ctx, index, tokenAddress, query)
 	if err != nil {
-		j.logger.Warn("token meta search failed", zap.String("token", tokenAddress), zap.Error(err))
+		j.logger.Debug("token meta search failed", zap.String("token", tokenAddress), zap.Error(err))
 	}
 	if err != nil || len(res.Hits.Hits) == 0 {
 		if err == nil {
@@ -169,11 +209,11 @@ func (j *SmartMoneyAnalyzer) getTokenMeta(ctx context.Context, tokenAddress stri
 		}
 		res, err = es.Search(ctx, index, query)
 		if err != nil {
-			j.logger.Warn("token meta fallback search failed", zap.String("token", tokenAddress), zap.Error(err))
+			j.logger.Debug("token meta fallback search failed", zap.String("token", tokenAddress), zap.Error(err))
 			return "", ""
 		}
 		if len(res.Hits.Hits) == 0 {
-			j.logger.Info("token meta not found", zap.String("token", tokenAddress))
+			j.logger.Debug("token meta not found", zap.String("token", tokenAddress))
 			return "", ""
 		}
 		j.logger.Debug("token meta fetched without routing", zap.String("token", tokenAddress))
@@ -191,15 +231,33 @@ func (j *SmartMoneyAnalyzer) getTokenMeta(ctx context.Context, tokenAddress stri
 	return name, icon
 }
 
+// 帶重試的 token meta 查詢：避免 ES 瞬時 miss 導致空值
+func (j *SmartMoneyAnalyzer) getTokenMetaWithRetry(ctx context.Context, tokenAddress string) (string, string) {
+	// 最多嘗試 3 次，簡單退避 50/100ms
+	for attempt := 0; attempt < 3; attempt++ {
+		name, icon := j.getTokenMeta(ctx, tokenAddress)
+		if name != "" || icon != "" {
+			return name, icon
+		}
+		// 若 ctx 已取消則提前返回
+		if ctx.Err() != nil {
+			return "", ""
+		}
+		time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
+	}
+	return "", ""
+}
+
 func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w *model.WalletSummary) (*model.WalletSummary, error) {
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 	now := time.Now()
-	tsNow := now.Unix()
-	ts1d := now.Add(-24 * time.Hour).Unix()
-	ts7d := now.Add(-7 * 24 * time.Hour).Unix()
-	ts30d := now.Add(-30 * 24 * time.Hour).Unix()
+	// 統一使用毫秒時間戳，與資料表中的 transaction_time/last_transaction_time 保持一致
+	tsNow := now.UnixMilli()
+	ts1d := now.Add(-24 * time.Hour).UnixMilli()
+	ts7d := now.Add(-7 * 24 * time.Hour).UnixMilli()
+	ts30d := now.Add(-30 * 24 * time.Hour).UnixMilli()
 
 	var txs []model.WalletTransaction
 	if err := db.WithContext(ctx).
@@ -254,6 +312,12 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 		isBuy := txType == "buy" || txType == "build"
 		isSell := txType == "sell" || txType == "clean"
 
+		// 成本回退：若某些來源未填 value，改用 amount * price 作為 USD 成本
+		buyCost := t.Value
+		if isBuy && (buyCost.LessThanOrEqual(decimal.Zero)) {
+			buyCost = t.Amount.Mul(t.Price)
+		}
+
 		// 最近 token 收集（按照時間順序，最後再從尾端取三個不重複）
 		recentTokens = append(recentTokens, t.TokenAddress)
 
@@ -262,7 +326,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 			s30.totalTx++
 			if isBuy {
 				s30.buyNum++
-				s30.totalCost = s30.totalCost.Add(t.Value)
+				s30.totalCost = s30.totalCost.Add(buyCost)
 			} else if isSell {
 				s30.sellNum++
 				s30.pnl = s30.pnl.Add(t.RealizedProfit)
@@ -270,7 +334,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 
 			// 日線 PNL（僅賣出/清倉記錄）
 			if isSell {
-				day := time.Unix(tt, 0).In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")
+				day := time.UnixMilli(tt).In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")
 				dailyPNL[day] = dailyPNL[day].Add(t.RealizedProfit)
 			}
 		}
@@ -280,7 +344,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 			s7.totalTx++
 			if isBuy {
 				s7.buyNum++
-				s7.totalCost = s7.totalCost.Add(t.Value)
+				s7.totalCost = s7.totalCost.Add(buyCost)
 			} else if isSell {
 				s7.sellNum++
 				s7.pnl = s7.pnl.Add(t.RealizedProfit)
@@ -292,7 +356,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 			s1.totalTx++
 			if isBuy {
 				s1.buyNum++
-				s1.totalCost = s1.totalCost.Add(t.Value)
+				s1.totalCost = s1.totalCost.Add(buyCost)
 			} else if isSell {
 				s1.sellNum++
 				s1.pnl = s1.pnl.Add(t.RealizedProfit)
@@ -370,7 +434,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 		}
 		p, err := j.getTokenPriceUSD(ctx, token)
 		if err != nil {
-			j.logger.Warn("es price fetch failed", zap.String("token", token), zap.Error(err))
+			j.logger.Debug("es price fetch failed", zap.String("token", token), zap.Error(err))
 			return 0
 		}
 		if p == 0 {
@@ -434,7 +498,12 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 				if tokens[t.TokenAddress] == nil {
 					tokens[t.TokenAddress] = &agg{}
 				}
-				tokens[t.TokenAddress].cost = tokens[t.TokenAddress].cost.Add(t.Value)
+				// 成本回退：優先用 value，為 0 則用 amount*price
+				cost := t.Value
+				if cost.LessThanOrEqual(decimal.Zero) {
+					cost = t.Amount.Mul(t.Price)
+				}
+				tokens[t.TokenAddress].cost = tokens[t.TokenAddress].cost.Add(cost)
 			} else if txType == "sell" || txType == "clean" {
 				if tokens[t.TokenAddress] == nil {
 					tokens[t.TokenAddress] = &agg{}
@@ -494,9 +563,19 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 			TokenName:    info.TokenName,
 		}
 	}
+	// 每個錢包處理內對 token meta 做簡單快取，減少 ES QPS
+	metaCache := make(map[string]tokenItem)
 	items := make([]tokenItem, 0, len(recent))
 	for _, addr := range recent {
-		name, icon := j.getTokenMeta(ctx, addr)
+		if cached, ok := metaCache[addr]; ok {
+			// 命中快取
+			if cached.TokenName != "" || cached.TokenIcon != "" {
+				items = append(items, cached)
+				continue
+			}
+		}
+
+		name, icon := j.getTokenMetaWithRetry(ctx, addr)
 		if prev, ok := existingTokenMap[addr]; ok {
 			if name == "" && prev.TokenName != "" {
 				j.logger.Debug("reuse existing token name", zap.String("wallet", w.WalletAddress), zap.String("token", addr), zap.String("name", prev.TokenName))
@@ -507,14 +586,15 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 				icon = prev.TokenIcon
 			}
 		}
+		// 仍然缺失則暫不寫入，避免以空值覆蓋；等待下輪再補
 		if name == "" && icon == "" {
-			j.logger.Info("token meta still missing", zap.String("wallet", w.WalletAddress), zap.String("token", addr))
+			j.logger.Debug("token meta still missing, skip this round", zap.String("wallet", w.WalletAddress), zap.String("token", addr))
+			metaCache[addr] = tokenItem{TokenAddress: addr}
+			continue
 		}
-		items = append(items, tokenItem{
-			TokenAddress: addr,
-			TokenIcon:    icon,
-			TokenName:    name,
-		})
+		ti := tokenItem{TokenAddress: addr, TokenIcon: icon, TokenName: name}
+		items = append(items, ti)
+		metaCache[addr] = ti
 	}
 	j.logger.Debug("wallet token_list prepared", zap.String("wallet", w.WalletAddress), zap.Int("token_count", len(items)))
 	tokenListBytes, _ := json.Marshal(items)
@@ -556,7 +636,8 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 		if !hasSmartMoneyTag(w.Tags) && passedClassifier {
 			newTags := append([]string{}, w.Tags...)
 			newTags = append(newTags, "smart money")
-			updates["tags"] = newTags
+			// 注意：PG varchar[] 需要 pq.StringArray
+			updates["tags"] = pq.StringArray(newTags)
 		}
 		updates["token_list"] = tokenList
 		updates["asset_multiple"] = s30.pnlPct.Div(decimal.NewFromInt(100)).Add(decimal.NewFromInt(1))
@@ -564,10 +645,9 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 
 		// 30d
 		updates["avg_cost_30d"] = s30.avgCost
-		updates["total_transaction_num_30d"] = s30.totalTx
 		updates["buy_num_30d"] = s30.buyNum
 		updates["sell_num_30d"] = s30.sellNum
-		updates["win_rate_30d"] = s30.winRate
+		updates["win_rate_30d"] = s30.winRate.Mul(decimal.NewFromInt(100))
 		updates["pnl_30d"] = s30.pnl
 		updates["pnl_percentage_30d"] = s30.pnlPct
 		updates["pnl_pic_30d"] = pnlPic30d
@@ -579,10 +659,9 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 
 		// 7d
 		updates["avg_cost_7d"] = s7.avgCost
-		updates["total_transaction_num_7d"] = s7.totalTx
 		updates["buy_num_7d"] = s7.buyNum
 		updates["sell_num_7d"] = s7.sellNum
-		updates["win_rate_7d"] = s7.winRate
+		updates["win_rate_7d"] = s7.winRate.Mul(decimal.NewFromInt(100))
 		updates["pnl_7d"] = s7.pnl
 		updates["pnl_percentage_7d"] = s7.pnlPct
 		updates["unrealized_profit_7d"] = unreal7d
@@ -617,10 +696,9 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 
 		// 1d
 		updates["avg_cost_1d"] = s1.avgCost
-		updates["total_transaction_num_1d"] = s1.totalTx
 		updates["buy_num_1d"] = s1.buyNum
 		updates["sell_num_1d"] = s1.sellNum
-		updates["win_rate_1d"] = s1.winRate
+		updates["win_rate_1d"] = s1.winRate.Mul(decimal.NewFromInt(100))
 		updates["pnl_1d"] = s1.pnl
 		updates["pnl_percentage_1d"] = s1.pnlPct
 		updates["unrealized_profit_1d"] = unreal1d
@@ -641,8 +719,16 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 	{
 		var bal decimal.Decimal
 		if v, ok := updates["balance"]; ok {
-			if d, ok2 := v.(decimal.Decimal); ok2 {
-				bal = d
+			// 兼容前面寫入 float64 的情況，統一轉成 decimal 計算
+			switch t := v.(type) {
+			case decimal.Decimal:
+				bal = t
+			case float64:
+				bal = decimal.NewFromFloat(t)
+				updates["balance"] = bal
+			case float32:
+				bal = decimal.NewFromFloat(float64(t))
+				updates["balance"] = bal
 			}
 		} else {
 			bal = w.Balance
@@ -695,6 +781,8 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 	if v, ok := updates["tags"]; ok {
 		if arr, ok2 := v.([]string); ok2 {
 			es.Tags = arr
+		} else if arr2, ok3 := v.(pq.StringArray); ok3 {
+			es.Tags = []string(arr2)
 		} else {
 			es.Tags = w.Tags
 		}
@@ -718,7 +806,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 		es.AvgCost30d = s30.avgCost
 		es.BuyNum30d = s30.buyNum
 		es.SellNum30d = s30.sellNum
-		es.WinRate30d = s30.winRate
+		es.WinRate30d = s30.winRate.Mul(decimal.NewFromInt(100))
 		es.PNL30d = s30.pnl
 		es.PNLPercentage30d = s30.pnlPct
 		es.PNLPic30d = pnlPic30d
@@ -729,7 +817,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 		es.AvgCost7d = s7.avgCost
 		es.BuyNum7d = s7.buyNum
 		es.SellNum7d = s7.sellNum
-		es.WinRate7d = s7.winRate
+		es.WinRate7d = s7.winRate.Mul(decimal.NewFromInt(100))
 		es.PNL7d = s7.pnl
 		es.PNLPercentage7d = s7.pnlPct
 		es.UnrealizedProfit7d = decimal.NewFromFloat(unreal7d)
@@ -739,7 +827,7 @@ func (j *SmartMoneyAnalyzer) updateOneWallet(ctx context.Context, db *gorm.DB, w
 		es.AvgCost1d = s1.avgCost
 		es.BuyNum1d = s1.buyNum
 		es.SellNum1d = s1.sellNum
-		es.WinRate1d = s1.winRate
+		es.WinRate1d = s1.winRate.Mul(decimal.NewFromInt(100))
 		es.PNL1d = s1.pnl
 		es.PNLPercentage1d = s1.pnlPct
 		es.UnrealizedProfit1d = decimal.NewFromFloat(unreal1d)

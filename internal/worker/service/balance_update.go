@@ -15,6 +15,7 @@ import (
 	"web3-smart/pkg/moralis"
 
 	"github.com/gagliardetto/solana-go"
+	"github.com/sourcegraph/conc/pool"
 	"go.uber.org/zap"
 )
 
@@ -28,7 +29,7 @@ type BalanceUpdate struct {
 
 func NewBalanceUpdate(cfg config.Config, logger *zap.Logger, repo repository.Repository) *BalanceUpdate {
 	balanceDbWriter := writer.NewAsyncBatchWriter(logger, balance.NewDbBalanceWriter(repo.GetDB(), logger), 1000, 300*time.Millisecond, "balance_db_writer", 1)
-	balanceSelectDbWriter := writer.NewAsyncBatchWriter(logger, balance.NewSelectDBBalanceWriter(repo.GetSelectDBHttp(), logger), 5000, 1000*time.Millisecond, "balance_select_db_writer", 4)
+	balanceSelectDbWriter := writer.NewAsyncBatchWriter(logger, balance.NewSelectDBBalanceWriter(repo.GetSelectDBHttp(), logger), 5000, 1000*time.Millisecond, "balance_select_db_writer", 2)
 	balanceDbWriter.Start(context.Background())
 	balanceSelectDbWriter.Start(context.Background())
 	wallet.MooxWalletInit(repo)
@@ -43,20 +44,12 @@ func NewBalanceUpdate(cfg config.Config, logger *zap.Logger, repo repository.Rep
 
 func (b *BalanceUpdate) UpdateBalance(blockBalance model.BlockBalance) {
 	netWork := blockBalance.Network
-	for i, bl := range blockBalance.Balances {
-		b.balanceSelectDbWriter.MustSubmit(model.Balance{
-			Wallet:       bl.Wallet,
-			TokenAddress: bl.TokenAddress,
-			TokenAccount: bl.TokenAccount,
-			Amount:       bl.Amount,
-			Decimal:      int(bl.Decimal),
-			BlockNumber:  int64(blockBalance.Number),
-			Version:      int64(blockBalance.Number),
-			UpdatedAt:    time.Now().Format("2006-01-02 15:04:05"),
-			Network:      netWork,
-		}, fmt.Sprintf("%s_%s_%s", netWork, bl.TokenAccount, bl.TokenAddress))
-		if b.mooxWallets.CheckAddress(netWork, bl.Wallet) || b.mooxWallets.CheckAddress(netWork, bl.TokenAccount) {
-			b.balanceDbWriter.Submit(model.Balance{
+	pool := pool.New().WithMaxGoroutines(40)
+	for index, balance := range blockBalance.Balances {
+		bl := balance
+		i := index
+		pool.Go(func() {
+			b.balanceSelectDbWriter.MustSubmit(model.Balance{
 				Wallet:       bl.Wallet,
 				TokenAddress: bl.TokenAddress,
 				TokenAccount: bl.TokenAccount,
@@ -66,15 +59,29 @@ func (b *BalanceUpdate) UpdateBalance(blockBalance model.BlockBalance) {
 				Version:      int64(blockBalance.Number),
 				UpdatedAt:    time.Now().Format("2006-01-02 15:04:05"),
 				Network:      netWork,
-			}, fmt.Sprintf("%s_%d", blockBalance.Hash, i))
-		}
+			}, fmt.Sprintf("%s_balance", netWork)) // 保证solana和bsc在不同的桶里面
+			if b.mooxWallets.CheckAddress(netWork, bl.Wallet) || b.mooxWallets.CheckAddress(netWork, bl.TokenAccount) {
+				b.balanceDbWriter.Submit(model.Balance{
+					Wallet:       bl.Wallet,
+					TokenAddress: bl.TokenAddress,
+					TokenAccount: bl.TokenAccount,
+					Amount:       bl.Amount,
+					Decimal:      int(bl.Decimal),
+					BlockNumber:  int64(blockBalance.Number),
+					Version:      int64(blockBalance.Number),
+					UpdatedAt:    time.Now().Format("2006-01-02 15:04:05"),
+					Network:      netWork,
+				}, fmt.Sprintf("%s_%d", blockBalance.Hash, i))
+			}
+		})
 	}
+	pool.Wait()
 	monitor.BalanceDelay.WithLabelValues(blockBalance.Network).Set(float64(uint64(time.Now().Unix()) - blockBalance.EventTime))
 }
 
 func (b *BalanceUpdate) LoadBalanceFromExternal(ctx context.Context, token model.HotToken) error {
 	submitFunc := func(wallet, tokenAccount, Amount string) {
-		b.balanceDbWriter.Submit(model.Balance{
+		b.balanceDbWriter.MustSubmit(model.Balance{
 			Wallet:       wallet,
 			TokenAddress: token.Address,
 			TokenAccount: tokenAccount,
@@ -84,7 +91,7 @@ func (b *BalanceUpdate) LoadBalanceFromExternal(ctx context.Context, token model
 			Version:      0,
 			UpdatedAt:    time.Now().Format("2006-01-02 15:04:05"),
 			Network:      token.Network,
-		}, fmt.Sprintf("%s_%s_%s", token.Network, token.Address, wallet))
+		}, fmt.Sprintf("%s_balance", token.Network)) // 保证solana和bsc在不同的桶里面
 		if b.mooxWallets.CheckAddress(token.Network, wallet) || b.mooxWallets.CheckAddress(token.Network, tokenAccount) {
 			b.balanceDbWriter.Submit(model.Balance{
 				Wallet:       wallet,

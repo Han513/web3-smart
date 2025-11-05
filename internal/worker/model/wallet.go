@@ -285,7 +285,6 @@ func (w *WalletSummary) updateTokenList(tokenInfo TokenInfo) TokenList {
 // ToESDocument converts WalletSummary to map with float64 values for ES indexing
 func (w *WalletSummary) ToESDocument() map[string]interface{} {
 	return map[string]interface{}{
-		"id":                                   w.ID,
 		"wallet_address":                       w.WalletAddress,
 		"avatar":                               w.Avatar,
 		"balance":                              w.Balance.InexactFloat64(),

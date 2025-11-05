@@ -40,7 +40,7 @@ func (sw *SelectDBBalanceWriter) BWrite(ctx context.Context, balances []model.Ba
 	newCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	const batchSize = 2000
+	const batchSize = 3000
 	const retryCount = 3
 
 	successBatch := make(map[int]bool)
