@@ -318,8 +318,8 @@ github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1/go.mod h1:Ohn+xnUBi
 github.com/youmark/pkcs8 v0.0.0-20181117223130-1be2e3e5546d/go.mod h1:rHwXgn7JulP+udvsHwJoVG1YGAP6VLg4y9I5dyZdqmA=
 github.com/yuin/goldmark v1.3.5/go.mod h1:mwnBkeHKe2W/ZEtQ+71ViKU8L12m81fl3OWwC1Zlc8k=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
-gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker.git v0.3.0 h1:EBYZT1OZjO1of5fHgYGaw1OCEDkb5JJDN348qdvuZiI=
-gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker.git v0.3.0/go.mod h1:i62TF/3wfAhLi9dmuqYFs3Z/pwr+cPT0fPjOP7ujzV4=
+gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker.git v0.3.8 h1:2YuVdaqizM9CmUpkAP8e153PXWFGRUv8sAwvsOaUYaA=
+gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker.git v0.3.8/go.mod h1:RjHDmO+6RyztSFkoIghtKORA8cgT6vQinaZu8tPkYnU=
 gitlab.codetech.pro/web3/chain_data/chain/dex_data_interface.git v0.0.7 h1:uWFb9vn4hlImKVjjR0Z3K3vz0tQoASRC9oqlh7CyCQ4=
 gitlab.codetech.pro/web3/chain_data/chain/dex_data_interface.git v0.0.7/go.mod h1:DInwQmeac/fz9EG7t4PegkqpwT19yUMzFGrRoamuG74=
 go.mongodb.org/mongo-driver v1.12.2 h1:gbWY1bJkkmUB9jjZzcdhOL8O85N9H+Vvsf2yFN0RDws=

@@ -53,12 +53,15 @@ func (w *WalletTransaction) TableName() string {
 }
 
 func NewWalletTransaction(
-	trade TradeEvent, smartMoney *WalletSummary, updatedHolding *WalletHolding, txType string,
+	trade TradeEvent, smartMoney *WalletSummary, prevHolding, updatedHolding *WalletHolding, txType string,
 	fromTokenInfo *SmTokenRet, toTokenInfo *SmTokenRet) *WalletTransaction {
 
 	logIndex := 0
 	if trade.Event.LogIndex != nil {
 		logIndex = int(*trade.Event.LogIndex)
+	}
+	if trade.Event.InsIndex != nil { // SOLANA链使用InsIndex作为logIndex
+		logIndex = int(*trade.Event.InsIndex)
 	}
 	tx := &WalletTransaction{
 		WalletAddress:            updatedHolding.WalletAddress,
@@ -94,27 +97,58 @@ func NewWalletTransaction(
 			if fromTokenInfo != nil {
 				symbol = fromTokenInfo.Symbol
 			}
-			tx.updateTxTokenFromTo(trade.Event.BaseMint, symbol, trade.Event.QuoteMint, tx.TokenName)
+			tx.updateTxTokenFromTo(trade.Event.QuoteMint, symbol, trade.Event.BaseMint, tx.TokenName)
 		} else {
 			symbol := ""
-			if toTokenInfo != nil {
-				symbol = toTokenInfo.Symbol
+			if fromTokenInfo != nil {
+				symbol = fromTokenInfo.Symbol
 			}
-			tx.updateTxTokenFromTo(trade.Event.QuoteMint, symbol, trade.Event.BaseMint, tx.TokenName)
+			tx.updateTxTokenFromTo(trade.Event.BaseMint, symbol, trade.Event.QuoteMint, tx.TokenName)
 		}
 	case TX_TYPE_SELL, TX_TYPE_CLEAN:
 		tx.Amount = decimal.NewFromFloat(trade.Event.FromTokenAmount)
-		denominator := updatedHolding.Amount.Add(tx.Amount)
-		if denominator.GreaterThan(decimal.Zero) {
-			tx.HoldingPercentage = tx.Amount.Div(denominator)
+		if prevHolding.Amount.GreaterThan(decimal.Zero) {
+			tx.HoldingPercentage = tx.Amount.Div(prevHolding.Amount)
 		}
-		priceDiff := decimal.NewFromFloat(trade.Event.Price).Sub(updatedHolding.AvgPrice)
+
+		priceDiff := decimal.NewFromFloat(trade.Event.Price).Sub(prevHolding.AvgPrice)
 		tx.RealizedProfit = tx.Amount.Mul(priceDiff)
-		// 百分比以「本次賣出成本」為分母：avg_price * sell_amount
-		costBasis := updatedHolding.AvgPrice.Mul(tx.Amount)
+
+		sellValueUSD := decimal.NewFromFloat(trade.Event.VolumeUsd)
+		prevHasHoldingAmount := prevHolding.Amount.GreaterThan(decimal.Zero)
+		isOversold := tx.Amount.GreaterThan(prevHolding.Amount)
+
+		var costBasis decimal.Decimal
+		if prevHolding.CurrentTotalCost.GreaterThan(decimal.Zero) {
+			if prevHasHoldingAmount && isOversold { // 超卖判断
+				costBasis = prevHolding.CurrentTotalCost
+				tx.RealizedProfit = prevHolding.Amount.Mul(priceDiff)
+			} else {
+				costBasis = prevHolding.AvgPrice.Mul(tx.Amount)
+				if prevHasHoldingAmount && costBasis.LessThan(prevHolding.CurrentTotalCost.Div(decimal.NewFromInt(1000))) {
+					sellRatio := tx.Amount.Div(prevHolding.Amount)
+					if sellRatio.GreaterThan(decimal.NewFromInt(1)) {
+						costBasis = prevHolding.CurrentTotalCost
+					} else {
+						costBasis = prevHolding.CurrentTotalCost.Mul(sellRatio)
+					}
+				}
+			}
+		} else {
+			costBasis = sellValueUSD
+			if prevHolding.Amount.LessThanOrEqual(decimal.Zero) {
+				tx.RealizedProfit = decimal.Zero
+			}
+		}
+
+		// 计算百分比
 		if costBasis.GreaterThan(decimal.Zero) {
 			tx.RealizedProfitPercentage = tx.RealizedProfit.Div(costBasis).Mul(decimal.NewFromInt(100))
+			// 限制异常值：上限设为100000%（1000倍），下限设为-100%
 			tx.RealizedProfitPercentage = decimal.Max(decimal.NewFromFloat(-100), tx.RealizedProfitPercentage)
+			tx.RealizedProfitPercentage = decimal.Min(decimal.NewFromFloat(100000), tx.RealizedProfitPercentage)
+		} else {
+			tx.RealizedProfitPercentage = updatedHolding.PNLPercentage.Sub(prevHolding.PNLPercentage)
 		}
 
 		if tx.TokenAddress == trade.Event.BaseMint {

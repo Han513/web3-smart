@@ -1,3 +1,5 @@
+SET search_path = dex_query_v1, public, dex_query, extensions, pg_catalog;
+
 CREATE TABLE dex_query_v1.t_smart_wallet (
   id bigserial PRIMARY KEY,
   wallet_address VARCHAR(512) NOT NULL,
@@ -74,7 +76,7 @@ COMMENT ON COLUMN dex_query_v1.t_smart_wallet.avatar IS '头像url';
 COMMENT ON COLUMN dex_query_v1.t_smart_wallet.balance IS '钱包余额native token';
 COMMENT ON COLUMN dex_query_v1.t_smart_wallet.balance_usd IS '钱包余额USD';
 COMMENT ON COLUMN dex_query_v1.t_smart_wallet.chain_id IS 'bip0044链ID';
-COMMENT ON COLUMN dex_query_v1.t_smart_wallet.tags IS 'smart_money, sniper...';
+COMMENT ON COLUMN dex_query_v1.t_smart_wallet.tags IS 'smart_wallet, sniper...';
 COMMENT ON COLUMN dex_query_v1.t_smart_wallet.twitter_name IS 'twitter name';
 COMMENT ON COLUMN dex_query_v1.t_smart_wallet.twitter_username IS 'twitter username';
 COMMENT ON COLUMN dex_query_v1.t_smart_wallet.wallet_type IS '钱包类型';

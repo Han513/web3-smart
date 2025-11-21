@@ -383,7 +383,7 @@ func (m *MigrationTable) normalizeAddress(address string) string {
 }
 
 // convertTokenListToArray 将逗号分隔的字符串转换为TokenList对象数组
-func convertTokenListToArray(tokenListStr string) model.TokenList {
+func (m *MigrationTable) convertTokenListToArray(chainID uint64, tokenListStr string) model.TokenList {
 	if tokenListStr == "" {
 		return model.TokenList{}
 	}
@@ -393,11 +393,27 @@ func convertTokenListToArray(tokenListStr string) model.TokenList {
 	for _, tokenAddr := range tokens {
 		tokenAddr = strings.TrimSpace(tokenAddr)
 		if tokenAddr != "" {
-			result = append(result, model.TokenInfo{
+			var tokenInfo model.SmTokenRet
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			err := m.repo.GetDB().WithContext(ctx).
+				Table("dex_query_v1.web3_tokens").
+				Select("address, name, symbol, total_supply as supply, contract_info->>'creator' AS creater, logo").
+				Where("chain_id = ? AND address = ?", chainID, tokenAddr).
+				First(&tokenInfo).Error
+			cancel()
+
+			t := model.TokenInfo{
 				TokenAddress: tokenAddr,
 				TokenIcon:    "", // 旧数据没有icon信息，设置为空
 				TokenName:    "", // 旧数据没有name信息，设置为空
-			})
+			}
+
+			if err == nil { // 查到数据则更新token信息
+				t.TokenIcon = tokenInfo.Logo
+				t.TokenName = tokenInfo.Symbol
+			}
+
+			result = append(result, t)
 		}
 	}
 	return result
@@ -417,7 +433,7 @@ func (m *MigrationTable) convertOldWalletSummaryToNew(old model.OldWalletSummary
 		TwitterUsername: old.TwitterUsername,
 		WalletType:      old.WalletType,
 		AssetMultiple:   limitFloat64ToDecimal(old.AssetMultiple),
-		TokenList:       convertTokenListToArray(old.TokenList),
+		TokenList:       m.convertTokenListToArray(old.ChainID, old.TokenList),
 
 		// 交易数据 - 30天
 		AvgCost30d: limitFloat64ToDecimal(old.AvgCost30d),
@@ -517,9 +533,27 @@ func (m *MigrationTable) convertOldWalletSummaryToNew(old model.OldWalletSummary
 	return new
 }
 
-// migrateWalletHolding 迁移钱包持仓数据
+// migrateWalletHolding 迁移钱包持仓数据（分两阶段）
 func (m *MigrationTable) migrateWalletHolding(ctx context.Context) error {
 	m.tl.Info("开始迁移钱包持仓数据")
+
+	// 阶段1：迁移旧wallet_holding表到新表
+	if err := m.migrateHoldingBasic(ctx); err != nil {
+		return fmt.Errorf("迁移基础持仓数据失败: %w", err)
+	}
+
+	// 阶段2：使用wallet_token_state表数据更新新表
+	if err := m.updateHoldingFromTokenState(ctx); err != nil {
+		return fmt.Errorf("使用token_state数据更新持仓失败: %w", err)
+	}
+
+	m.tl.Info("钱包持仓数据迁移完成")
+	return nil
+}
+
+// migrateHoldingBasic 阶段1：迁移旧wallet_holding表的基础数据
+func (m *MigrationTable) migrateHoldingBasic(ctx context.Context) error {
+	m.tl.Info("阶段1：开始迁移基础持仓数据")
 
 	db := m.repo.GetDB()
 	var totalCount int64
@@ -541,20 +575,19 @@ func (m *MigrationTable) migrateWalletHolding(ctx context.Context) error {
 		default:
 		}
 
-		// 使用JOIN查询，在数据库层面关联holding和token_state表
-		holdingWithStates, err := m.queryHoldingWithTokenState(db, BatchSize, offset)
-		if err != nil {
+		var oldHoldings []model.OldWalletHolding
+		if err := db.Limit(BatchSize).Offset(offset).Find(&oldHoldings).Error; err != nil {
 			return fmt.Errorf("查询钱包持仓数据失败: %w", err)
 		}
 
-		if len(holdingWithStates) == 0 {
+		if len(oldHoldings) == 0 {
 			break
 		}
 
 		// 转换数据格式
-		newHoldings := make([]model.WalletHolding, 0, len(holdingWithStates))
-		for _, data := range holdingWithStates {
-			new := m.convertHoldingWithStateToNew(data)
+		newHoldings := make([]model.WalletHolding, 0, len(oldHoldings))
+		for _, old := range oldHoldings {
+			new := m.convertOldHoldingToNew(old)
 			newHoldings = append(newHoldings, new)
 		}
 
@@ -566,190 +599,239 @@ func (m *MigrationTable) migrateWalletHolding(ctx context.Context) error {
 			m.holdingAsyncWriter.MustSubmit(holding, utils.MergeHashKey(holding.WalletAddress, holding.UpdatedAt))
 		}
 
-		processed += int64(len(holdingWithStates))
+		processed += int64(len(oldHoldings))
 		offset += BatchSize
 
 		// 打印进度
 		if processed%10000 == 0 || processed == totalCount {
 			progress := float64(processed) / float64(totalCount) * 100
-			m.tl.Info("钱包持仓数据迁移进度",
+			m.tl.Info("基础持仓数据迁移进度",
 				zap.Int64("processed", processed),
 				zap.Int64("total", totalCount),
 				zap.Float64("progress", progress))
 		}
 	}
 
-	m.tl.Info("钱包持仓数据迁移完成", zap.Int64("total", processed))
+	m.tl.Info("基础持仓数据迁移完成", zap.Int64("total", processed))
 	return nil
 }
 
-// HoldingWithTokenState 存储holding和token_state的关联查询结果
-type HoldingWithTokenState struct {
-	// Holding数据
-	HID                  int       `db:"h_id"`
-	HWalletAddress       string    `db:"h_wallet_address"`
-	HTokenAddress        string    `db:"h_token_address"`
-	HTokenIcon           string    `db:"h_token_icon"`
-	HTokenName           string    `db:"h_token_name"`
-	HChain               string    `db:"h_chain"`
-	HAmount              float64   `db:"h_amount"`
-	HValue               float64   `db:"h_value"`
-	HValueUSDT           float64   `db:"h_value_usdt"`
-	HUnrealizedProfits   float64   `db:"h_unrealized_profits"`
-	HPNL                 float64   `db:"h_pnl"`
-	HPNLPercentage       float64   `db:"h_pnl_percentage"`
-	HAvgPrice            float64   `db:"h_avg_price"`
-	HMarketCap           float64   `db:"h_marketcap"`
-	HIsCleared           bool      `db:"h_is_cleared"`
-	HCumulativeCost      float64   `db:"h_cumulative_cost"`
-	HCumulativeProfit    float64   `db:"h_cumulative_profit"`
-	HLastTransactionTime int64     `db:"h_last_transaction_time"`
-	HTime                time.Time `db:"h_time"`
+// updateHoldingFromTokenState 阶段2：使用wallet_token_state表数据更新新表
+func (m *MigrationTable) updateHoldingFromTokenState(ctx context.Context) error {
+	m.tl.Info("阶段2：开始使用token_state数据更新持仓")
 
-	// TokenState数据（可能为NULL）
-	TSCurrentAmount         *float64 `db:"ts_current_amount"`
-	TSCurrentTotalCost      *float64 `db:"ts_current_total_cost"`
-	TSCurrentAvgBuyPrice    *float64 `db:"ts_current_avg_buy_price"`
-	TSPositionOpenedAt      *int64   `db:"ts_position_opened_at"`
-	TSHistoricalBuyAmount   *float64 `db:"ts_historical_buy_amount"`
-	TSHistoricalSellAmount  *float64 `db:"ts_historical_sell_amount"`
-	TSHistoricalBuyCost     *float64 `db:"ts_historical_buy_cost"`
-	TSHistoricalSellValue   *float64 `db:"ts_historical_sell_value"`
-	TSHistoricalRealizedPNL *float64 `db:"ts_historical_realized_pnl"`
-	TSHistoricalBuyCount    *int     `db:"ts_historical_buy_count"`
-	TSHistoricalSellCount   *int     `db:"ts_historical_sell_count"`
-	TSLastTransactionTime   *int64   `db:"ts_last_transaction_time"`
-}
+	db := m.repo.GetDB()
+	var totalCount int64
 
-// queryHoldingWithTokenState 使用JOIN查询holding和token_state数据
-func (m *MigrationTable) queryHoldingWithTokenState(db *gorm.DB, limit, offset int) ([]HoldingWithTokenState, error) {
-	var results []HoldingWithTokenState
-
-	// 使用原生SQL查询，LEFT JOIN确保即使没有token_state也能查出holding数据
-	query := `
-		SELECT 
-			h.id as h_id, h.wallet_address as h_wallet_address, h.token_address as h_token_address, 
-			h.token_icon as h_token_icon, h.token_name as h_token_name, h.chain as h_chain,
-			h.amount as h_amount, h.value as h_value, h.value_usdt as h_value_usdt,
-			h.unrealized_profits as h_unrealized_profits, h.pnl as h_pnl, 
-			h.pnl_percentage as h_pnl_percentage, h.avg_price as h_avg_price,
-			h.marketcap as h_marketcap, h.is_cleared as h_is_cleared,
-			h.cumulative_cost as h_cumulative_cost, h.cumulative_profit as h_cumulative_profit,
-			h.last_transaction_time as h_last_transaction_time, h.time as h_time,
-			
-			ts.current_amount as ts_current_amount, ts.current_total_cost as ts_current_total_cost,
-			ts.current_avg_buy_price as ts_current_avg_buy_price, ts.position_opened_at as ts_position_opened_at,
-			ts.historical_buy_amount as ts_historical_buy_amount, ts.historical_sell_amount as ts_historical_sell_amount,
-			ts.historical_buy_cost as ts_historical_buy_cost, ts.historical_sell_value as ts_historical_sell_value,
-			ts.historical_realized_pnl as ts_historical_realized_pnl, ts.historical_buy_count as ts_historical_buy_count,
-			ts.historical_sell_count as ts_historical_sell_count, ts.last_transaction_time as ts_last_transaction_time
-		FROM dex_query_v1.wallet_holding h
-		LEFT JOIN dex_query_v1.wallet_token_state ts ON h.wallet_address = ts.wallet_address AND h.token_address = ts.token_address
-		ORDER BY h.id
-		LIMIT ? OFFSET ?
-	`
-
-	err := db.Raw(query, limit, offset).Scan(&results).Error
-	if err != nil {
-		return nil, err
+	// 获取token_state总数量
+	if err := db.Table("dex_query_v1.wallet_token_state").Count(&totalCount).Error; err != nil {
+		return fmt.Errorf("获取token_state数据总数失败: %w", err)
 	}
 
-	return results, nil
-}
+	m.tl.Info("token_state数据统计", zap.Int64("total", totalCount))
 
-// convertHoldingWithStateToNew 转换关联查询结果到新格式
-func (m *MigrationTable) convertHoldingWithStateToNew(data HoldingWithTokenState) model.WalletHolding {
-	new := model.WalletHolding{
-		// 基础信息（从holding表）
-		WalletAddress: utils.ChecksumAddress(data.HWalletAddress, data.HChain),
-		TokenAddress:  utils.ChecksumAddress(data.HTokenAddress, data.HChain),
-		TokenIcon:     data.HTokenIcon,
-		TokenName:     data.HTokenName,
-		Amount:        limitFloat64ToDecimal(data.HAmount),
-		ValueUSD:      limitFloat64ToDecimal(data.HValueUSDT), // 映射字段名
+	var processed int64
+	offset := 0
 
-		// 盈亏数据（从holding表）
-		UnrealizedProfits: limitFloat64ToDecimal(data.HUnrealizedProfits),
-		PNL:               limitFloat64ToDecimal(data.HPNL),
-		PNLPercentage:     limitFloat64ToDecimal(data.HPNLPercentage),
-		AvgPrice:          limitFloat64ToDecimal(data.HAvgPrice),
-		CurrentTotalCost:  limitFloat64ToDecimal(data.HCumulativeCost), // 映射字段名
-		MarketCap:         limitFloat64ToDecimal(data.HMarketCap),
-    // is_cleared 已移除，不再映射
-		IsDev:             false, // 旧表没有这个字段，默认false
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 
-		// 历史累计状态 - 默认值，会被TokenState数据覆盖
-		HistoricalBuyAmount:  limitFloat64ToDecimal(data.HAmount),           // 默认：假设当前持仓就是历史买入
-		HistoricalSellAmount: decimal.Zero,                                  // 默认为0
-		HistoricalBuyCost:    limitFloat64ToDecimal(data.HCumulativeCost),   // 默认：累计成本即为买入成本
-		HistoricalSellValue:  limitFloat64ToDecimal(data.HCumulativeProfit), // 默认：累计盈利
-		HistoricalBuyCount:   1,                                             // 默认为1
-		HistoricalSellCount:  0,                                             // 默认为0
+		var tokenStates []TokenStateData
+		err := db.Table("dex_query_v1.wallet_token_state").
+			Limit(BatchSize).
+			Offset(offset).
+			Find(&tokenStates).Error
+		if err != nil {
+			return fmt.Errorf("查询token_state数据失败: %w", err)
+		}
 
-		// 时间信息（从holding表）
-		LastTransactionTime: data.HLastTransactionTime * 1000,
-		UpdatedAt:           data.HTime.UnixMilli(),
-		CreatedAt:           time.Now().UnixMilli(),
-	}
+		if len(tokenStates) == 0 {
+			break
+		}
 
-	// 设置ChainID，从chain字段推导
-	chainID := bip0044.NetworkNameToChainId(data.HChain)
-	new.ChainID = chainID
+		// 批量更新
+		for _, ts := range tokenStates {
+			if err := m.acquireToken(ctx); err != nil {
+				return err
+			}
 
-	// 如果有TokenState数据，使用其覆盖默认值
-	if data.TSHistoricalBuyAmount != nil {
-		new.HistoricalBuyAmount = limitFloat64ToDecimal(*data.TSHistoricalBuyAmount)
-	}
-	if data.TSHistoricalSellAmount != nil {
-		new.HistoricalSellAmount = limitFloat64ToDecimal(*data.TSHistoricalSellAmount)
-	}
-	if data.TSHistoricalBuyCost != nil {
-		new.HistoricalBuyCost = limitFloat64ToDecimal(*data.TSHistoricalBuyCost)
-	}
-	if data.TSHistoricalSellValue != nil {
-		new.HistoricalSellValue = limitFloat64ToDecimal(*data.TSHistoricalSellValue)
-	}
-	if data.TSHistoricalBuyCount != nil {
-		new.HistoricalBuyCount = *data.TSHistoricalBuyCount
-	}
-	if data.TSHistoricalSellCount != nil {
-		new.HistoricalSellCount = *data.TSHistoricalSellCount
-	}
+			// 更新对应的holding记录
+			if err := m.updateHoldingRecord(db, ts); err != nil {
+				m.tl.Warn("更新holding记录失败",
+					zap.String("wallet", ts.WalletAddress),
+					zap.String("token", ts.TokenAddress),
+					zap.Error(err))
+				// 继续处理下一条，不中断
+			}
+		}
 
-	// 使用TokenState的建仓时间（如果有的话）
-	if data.TSPositionOpenedAt != nil {
-		tmp := *data.TSPositionOpenedAt * 1000
-		new.PositionOpenedAt = &tmp
-	}
+		processed += int64(len(tokenStates))
+		offset += BatchSize
 
-	// 使用TokenState的最后交易时间（如果更准确的话）
-	if data.TSLastTransactionTime != nil && *data.TSLastTransactionTime > new.LastTransactionTime {
-		new.LastTransactionTime = *data.TSLastTransactionTime * 1000
-		if *data.TSLastTransactionTime > 1800000000 { // 如果是毫秒级时间戳，则不操作
-			new.LastTransactionTime = *data.TSLastTransactionTime
+		// 打印进度
+		if processed%10000 == 0 || processed == totalCount {
+			progress := float64(processed) / float64(totalCount) * 100
+			m.tl.Info("token_state数据更新进度",
+				zap.Int64("processed", processed),
+				zap.Int64("total", totalCount),
+				zap.Float64("progress", progress))
 		}
 	}
 
-	// 使用TokenState的当前持仓数据（可能更准确）
-	if data.TSCurrentAmount != nil && *data.TSCurrentAmount > 0 {
-		new.Amount = limitFloat64ToDecimal(*data.TSCurrentAmount)
-	}
-	if data.TSCurrentTotalCost != nil && *data.TSCurrentTotalCost > 0 {
-		new.CurrentTotalCost = limitFloat64ToDecimal(*data.TSCurrentTotalCost)
-	}
-	if data.TSCurrentAvgBuyPrice != nil && *data.TSCurrentAvgBuyPrice > 0 {
-		new.AvgPrice = limitFloat64ToDecimal(*data.TSCurrentAvgBuyPrice)
+	m.tl.Info("token_state数据更新完成", zap.Int64("total", processed))
+	return nil
+}
+
+// TokenStateData 存储wallet_token_state表的数据
+type TokenStateData struct {
+	WalletAddress         string  `gorm:"column:wallet_address"`
+	TokenAddress          string  `gorm:"column:token_address"`
+	Chain                 string  `gorm:"column:chain"`
+	CurrentAmount         float64 `gorm:"column:current_amount"`
+	CurrentTotalCost      float64 `gorm:"column:current_total_cost"`
+	CurrentAvgBuyPrice    float64 `gorm:"column:current_avg_buy_price"`
+	PositionOpenedAt      int64   `gorm:"column:position_opened_at"`
+	HistoricalBuyAmount   float64 `gorm:"column:historical_buy_amount"`
+	HistoricalSellAmount  float64 `gorm:"column:historical_sell_amount"`
+	HistoricalBuyCost     float64 `gorm:"column:historical_buy_cost"`
+	HistoricalSellValue   float64 `gorm:"column:historical_sell_value"`
+	HistoricalRealizedPNL float64 `gorm:"column:historical_realized_pnl"`
+	HistoricalBuyCount    int     `gorm:"column:historical_buy_count"`
+	HistoricalSellCount   int     `gorm:"column:historical_sell_count"`
+	LastTransactionTime   int64   `gorm:"column:last_transaction_time"`
+}
+
+// convertOldHoldingToNew 转换旧holding数据到新格式（仅基础数据）
+func (m *MigrationTable) convertOldHoldingToNew(old model.OldWalletHolding) model.WalletHolding {
+	new := model.WalletHolding{
+		// 基础信息
+		WalletAddress: utils.ChecksumAddress(old.WalletAddress, old.Chain),
+		TokenAddress:  utils.ChecksumAddress(old.TokenAddress, old.Chain),
+		TokenIcon:     old.TokenIcon,
+		TokenName:     old.TokenName,
+		Amount:        limitFloat64ToDecimal(old.Amount),
+		ValueUSD:      limitFloat64ToDecimal(old.ValueUSDT),
+
+		// 盈亏数据
+		UnrealizedProfits: limitFloat64ToDecimal(old.UnrealizedProfits),
+		PNL:               limitFloat64ToDecimal(old.PNL),
+		PNLPercentage:     limitFloat64ToDecimal(old.PNLPercentage),
+		AvgPrice:          limitFloat64ToDecimal(old.AvgPrice),
+		CurrentTotalCost:  limitFloat64ToDecimal(old.CumulativeCost),
+		MarketCap:         limitFloat64ToDecimal(old.MarketCap),
+		IsDev:             false, // 旧表没有这个字段，默认false
+
+		// 历史累计状态 - 使用默认值，后续会被token_state更新
+		HistoricalBuyAmount:  limitFloat64ToDecimal(old.Amount),           // 默认：当前持仓
+		HistoricalSellAmount: decimal.Zero,                                // 默认为0
+		HistoricalBuyCost:    limitFloat64ToDecimal(old.CumulativeCost),   // 默认：累计成本
+		HistoricalSellValue:  limitFloat64ToDecimal(old.CumulativeProfit), // 默认：累计盈利
+		HistoricalBuyCount:   1,                                           // 默认为1
+		HistoricalSellCount:  0,                                           // 默认为0
+
+		// 时间信息
+		LastTransactionTime: old.LastTransactionTime * 1000,
+		UpdatedAt:           old.Time.UnixMilli(),
+		CreatedAt:           time.Now().UnixMilli(),
 	}
 
-	// 设置首次建仓时间（如果还没有设置的话）
-	if new.PositionOpenedAt == nil && new.LastTransactionTime > 0 {
+	// 设置ChainID
+	chainID := bip0044.NetworkNameToChainId(old.Chain)
+	new.ChainID = chainID
+
+	// 设置首次建仓时间
+	if new.LastTransactionTime > 0 {
 		new.PositionOpenedAt = &new.LastTransactionTime
 	}
 
-	// 设置tags - 可以根据业务逻辑添加
+	// 设置tags
 	new.Tags = pq.StringArray([]string{})
 
 	return new
+}
+
+// updateHoldingRecord 使用token_state数据更新holding记录
+func (m *MigrationTable) updateHoldingRecord(db *gorm.DB, ts TokenStateData) error {
+	// 规范化地址
+	walletAddress := utils.ChecksumAddress(ts.WalletAddress, ts.Chain)
+	tokenAddress := utils.ChecksumAddress(ts.TokenAddress, ts.Chain)
+
+	// 构建更新map
+	updates := make(map[string]interface{})
+
+	// 更新历史累计数据
+	if ts.HistoricalBuyAmount >= 0 {
+		updates["historical_buy_amount"] = limitFloat64ToDecimal(ts.HistoricalBuyAmount)
+	}
+	if ts.HistoricalSellAmount >= 0 {
+		updates["historical_sell_amount"] = limitFloat64ToDecimal(ts.HistoricalSellAmount)
+	}
+	if ts.HistoricalBuyCost >= 0 {
+		updates["historical_buy_cost"] = limitFloat64ToDecimal(ts.HistoricalBuyCost)
+	}
+	if ts.HistoricalSellValue >= 0 {
+		updates["historical_sell_value"] = limitFloat64ToDecimal(ts.HistoricalSellValue)
+	}
+	if ts.HistoricalBuyCount > 0 {
+		updates["historical_buy_count"] = ts.HistoricalBuyCount
+	}
+	if ts.HistoricalSellCount >= 0 {
+		updates["historical_sell_count"] = ts.HistoricalSellCount
+	}
+
+	// 更新当前持仓数据（如果token_state的数据更准确）
+	if ts.CurrentAmount > 0 {
+		updates["amount"] = limitFloat64ToDecimal(ts.CurrentAmount)
+	}
+	if ts.CurrentTotalCost > 0 {
+		updates["current_total_cost"] = limitFloat64ToDecimal(ts.CurrentTotalCost)
+	}
+	if ts.CurrentAvgBuyPrice > 0 {
+		updates["avg_price"] = limitFloat64ToDecimal(ts.CurrentAvgBuyPrice)
+	}
+
+	// 更新建仓时间
+	if ts.PositionOpenedAt > 0 {
+		positionOpenedAt := ts.PositionOpenedAt * 1000
+		updates["position_opened_at"] = positionOpenedAt
+	}
+
+	// 更新最后交易时间（如果更新）
+	if ts.LastTransactionTime > 0 {
+		lastTransactionTime := ts.LastTransactionTime * 1000
+		// 判断是否已经是毫秒级
+		if ts.LastTransactionTime > 1800000000 {
+			lastTransactionTime = ts.LastTransactionTime
+		}
+		updates["last_transaction_time"] = lastTransactionTime
+	}
+
+	// 如果没有需要更新的字段，直接返回
+	if len(updates) == 0 {
+		return nil
+	}
+
+	// 执行更新
+	result := db.Table("dex_query_v1.t_smart_holding").
+		Where("wallet_address = ? AND token_address = ?", walletAddress, tokenAddress).
+		Updates(updates)
+
+	if result.Error != nil {
+		return result.Error
+	}
+
+	// 如果没有匹配到记录，记录警告（不返回错误，因为可能holding表中没有这条记录）
+	if result.RowsAffected == 0 {
+		m.tl.Debug("未找到对应的holding记录",
+			zap.String("wallet", walletAddress),
+			zap.String("token", tokenAddress))
+	}
+
+	return nil
 }
 
 // migrateWalletTransaction 迁移钱包交易数据

@@ -3,29 +3,38 @@ package dao
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
+	"web3-smart/internal/worker/config"
 	"web3-smart/internal/worker/model"
+	"web3-smart/pkg/elasticsearch"
 	"web3-smart/pkg/utils"
 
 	"github.com/bytedance/sonic"
 	"github.com/patrickmn/go-cache"
 	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
+	"gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker/common/bip0044"
 	"gorm.io/gorm"
 )
 
 // tokenDAO 实现TokenDAO接口
 type tokenDAO struct {
+	cfg        *config.Config
 	db         *gorm.DB
+	es         *elasticsearch.Client
 	rds        *redis.Client
 	localCache *cache.Cache
 }
 
 // NewTokenDAO 创建TokenDAO实例
-func NewTokenDAO(db *gorm.DB, rds *redis.Client) TokenDAO {
+func NewTokenDAO(cfg *config.Config, db *gorm.DB, es *elasticsearch.Client, rds *redis.Client) TokenDAO {
 	localCache := cache.New(10*time.Minute, time.Minute)
 	return &tokenDAO{
+		cfg:        cfg,
 		db:         db,
+		es:         es,
 		rds:        rds,
 		localCache: localCache,
 	}
@@ -37,7 +46,7 @@ func (t *tokenDAO) GetTokenInfo(ctx context.Context, chainID uint64, tokenAddres
 	switch chainID {
 	case 501:
 		// 僅對已知的 SOL/wSOL 特殊地址做快捷返回；其他地址走資料庫/快取
-		if tokenAddress == "So11111111111111111111111111111111111111111" { // SOL 合約地址
+		if tokenAddress == "So11111111111111111111111111111111111111111" { // native SOL 佔位標識
 			tokenInfo := &model.SmTokenRet{
 				Address: tokenAddress,
 				Name:    "SOLANA",
@@ -72,6 +81,14 @@ func (t *tokenDAO) GetTokenInfo(ctx context.Context, chainID uint64, tokenAddres
 			tokenInfo.Supply = &totalSupply
 			return tokenInfo, nil
 		}
+		if tokenAddress == "0x0000000000000000000000000000000000000000" {
+			totalSupply := decimal.NewFromFloat(137740000)
+			tokenInfo.Supply = &totalSupply
+			tokenInfo.Symbol = "BNB"
+			tokenInfo.Name = "Binance Chain"
+			tokenInfo.Logo = "https://uploads.bydfi.in/events/chain-BNB.png"
+			return tokenInfo, nil
+		}
 	}
 
 	cacheKey := utils.TokenInfoKey(chainID, tokenAddress)
@@ -99,30 +116,52 @@ func (t *tokenDAO) GetTokenInfo(ctx context.Context, chainID uint64, tokenAddres
 	}
 
 	// 查数据库
-	var tokenInfo model.SmTokenRet
-	err = t.db.WithContext(ctx).
-		Table("dex_query_v1.web3_tokens").
-		Select("address, name, symbol, total_supply as supply, contract_info->>'creator' AS creater, logo").
-		Where("chain_id = ? AND address = ?", chainID, tokenAddress).
-		First(&tokenInfo).Error
+	// var tokenInfo model.SmTokenRet
+	// err = t.db.WithContext(ctx).
+	// 	Table("dex_query_v1.web3_tokens").
+	// 	Select("address, name, symbol, total_supply as supply, contract_info->>'creator' AS creater, logo").
+	// 	Where("chain_id = ? AND address = ?", chainID, tokenAddress).
+	// 	First(&tokenInfo).Error
 
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// 缓存空结果，避免缓存穿透
-			t.localCache.Set(cacheKey, (*model.SmTokenRet)(nil), 1*time.Minute)
-			t.rds.Set(ctx, cacheKey, "null", 1*time.Minute).Result()
-			return nil, nil
+	// if err != nil {
+	// 	if errors.Is(err, gorm.ErrRecordNotFound) {
+	// 		// 缓存空结果，避免缓存穿透
+	// 		t.localCache.Set(cacheKey, (*model.SmTokenRet)(nil), 1*time.Minute)
+	// 		t.rds.Set(ctx, cacheKey, "null", 1*time.Minute).Result()
+	// 		return nil, nil
+	// 	}
+	// 	return nil, err
+	// }
+
+	// 查ES
+	var tokenInfo *model.SmTokenRet
+	var lastErr error
+
+	// 重试3次
+	for attempt := 1; attempt <= 3; attempt++ {
+		tokenInfo, lastErr = t.getTokenFromES(ctx, chainID, tokenAddress)
+		if lastErr == nil && tokenInfo != nil && strings.TrimSpace(tokenInfo.Symbol) != "" {
+			break
 		}
-		return nil, err
+
+		// 查询出错，继续重试
+		time.Sleep(time.Duration(attempt*800) * time.Millisecond) // 递增延迟
+	}
+
+	// 重试都失败，缓存空结果避免缓存穿透
+	if lastErr != nil {
+		t.localCache.Set(cacheKey, (*model.SmTokenRet)(nil), 1*time.Minute)
+		t.rds.Set(ctx, cacheKey, "null", 1*time.Minute)
+		return nil, lastErr
 	}
 
 	// 更新缓存
-	t.updateTokenInfoCache(ctx, cacheKey, &tokenInfo)
-	return &tokenInfo, nil
+	t.UpdateTokenInfoCache(ctx, cacheKey, tokenInfo)
+	return tokenInfo, nil
 }
 
 // updateTokenInfoCache 更新代币信息缓存
-func (t *tokenDAO) updateTokenInfoCache(ctx context.Context, cacheKey string, tokenInfo *model.SmTokenRet) {
+func (t *tokenDAO) UpdateTokenInfoCache(ctx context.Context, cacheKey string, tokenInfo *model.SmTokenRet) {
 	// 更新本地缓存
 	t.localCache.Set(cacheKey, tokenInfo, cache.DefaultExpiration)
 
@@ -196,4 +235,60 @@ func (t *tokenDAO) GetBySymbol(ctx context.Context, chainID uint64, symbol strin
 	}
 
 	return tokens, nil
+}
+
+// getTokenFromES 从ES查询token信息
+func (t *tokenDAO) getTokenFromES(ctx context.Context, chainID uint64, tokenAddress string) (*model.SmTokenRet, error) {
+	// 获取network名称
+	network := bip0044.ChainIdToString(chainID)
+
+	// 构造文档ID: {network}_{address}
+	docID := fmt.Sprintf("%s_%s", network, tokenAddress)
+	indexName := t.cfg.Elasticsearch.Web3TokensIndexName
+
+	// 从ES获取文档
+	source, err := t.es.Get(ctx, indexName, docID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 文档不存在
+	if source == nil {
+		return nil, nil
+	}
+
+	// 解析文档数据
+	tokenInfo := &model.SmTokenRet{
+		Address: tokenAddress,
+	}
+
+	// 提取name
+	if name, ok := source["name"].(string); ok {
+		tokenInfo.Name = name
+	}
+
+	// 提取symbol
+	if symbol, ok := source["symbol"].(string); ok {
+		tokenInfo.Symbol = symbol
+	}
+
+	// 提取logo
+	if logo, ok := source["logo"].(string); ok {
+		tokenInfo.Logo = logo
+	}
+
+	// 提取total_supply
+	if totalSupply, ok := source["total_supply"].(float64); ok {
+		supply := decimal.NewFromFloat(totalSupply)
+		tokenInfo.Supply = &supply
+	}
+
+	// 提取creator (从contract_info.creator)
+	if contractInfo, ok := source["contract_info"].(map[string]interface{}); ok {
+		if creator, ok := contractInfo["creator"].(string); ok && creator != "" {
+			tokenInfo.Creater = &creator
+		}
+	}
+
+	return tokenInfo, nil
 }

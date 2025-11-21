@@ -131,7 +131,10 @@ func GetBscBalance(ctx context.Context, client *ethclient.Client, address string
 	nativeBal, tokenBals, err := GetWalletBalances(ctx, client, wallet, tokens)
 
 	// 原生代币余额，带精度
-	adjNativeBal := utils.AdjustDecimals(nativeBal, 18)
+	adjNativeBal := decimal.NewFromFloat(0)
+	if nativeBal != nil {
+		adjNativeBal = utils.AdjustDecimals(nativeBal, 18)
+	}
 
 	// 转换ERC20代币带精度余额
 	m := make(map[string]decimal.Decimal)

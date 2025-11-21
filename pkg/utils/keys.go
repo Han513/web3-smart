@@ -21,3 +21,7 @@ func TokenInfoKey(chainId uint64, tokenAddress string) string {
 func PairsEarliestBlockTimestampKey(chainId uint64, tokenAddress string) string {
 	return fmt.Sprintf("smart_money:pairs_earliest:%d:%s", chainId, tokenAddress)
 }
+
+func MissingTokenInfoKey() string {
+	return "smart_money:missing_tokeninfo:list"
+}

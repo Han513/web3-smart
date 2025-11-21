@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"web3-smart/internal/worker/config"
 	"web3-smart/internal/worker/model"
 	"web3-smart/pkg/utils"
 
@@ -16,15 +17,17 @@ import (
 
 // walletDAO 实现WalletDAO接口
 type walletDAO struct {
+	cfg        *config.Config
 	db         *gorm.DB
 	rds        *redis.Client
 	localCache *cache.Cache
 }
 
 // NewWalletDAO 创建WalletDAO实例
-func NewWalletDAO(db *gorm.DB, rds *redis.Client) WalletDAO {
+func NewWalletDAO(cfg *config.Config, db *gorm.DB, rds *redis.Client) WalletDAO {
 	localCache := cache.New(10*time.Minute, time.Minute)
 	return &walletDAO{
+		cfg:        cfg,
 		db:         db,
 		rds:        rds,
 		localCache: localCache,

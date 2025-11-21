@@ -139,7 +139,7 @@ func (tc *TradeConsumer) dispatch(trade model.TradeEvent) {
 
 	// 检测 buffer 是否接近满载，触发短暂休眠
 	if len(tc.buffers[idx]) > cap(tc.buffers[idx])*8/10 {
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	// 发送到通道

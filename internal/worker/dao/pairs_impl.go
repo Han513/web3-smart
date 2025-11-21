@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"time"
+	"web3-smart/internal/worker/config"
 	"web3-smart/internal/worker/model"
 	"web3-smart/pkg/utils"
 
@@ -15,15 +16,17 @@ import (
 
 // pairsDAO 实现PairsDAO接口
 type pairsDAO struct {
+	cfg        *config.Config
 	db         *gorm.DB
 	rds        *redis.Client
 	localCache *cache.Cache
 }
 
 // NewPairsDAO 创建PairsDAO实例
-func NewPairsDAO(db *gorm.DB, rds *redis.Client) PairsDAO {
+func NewPairsDAO(cfg *config.Config, db *gorm.DB, rds *redis.Client) PairsDAO {
 	localCache := cache.New(10*time.Minute, time.Minute)
 	return &pairsDAO{
+		cfg:        cfg,
 		db:         db,
 		rds:        rds,
 		localCache: localCache,
@@ -33,6 +36,44 @@ func NewPairsDAO(db *gorm.DB, rds *redis.Client) PairsDAO {
 // GetEarliestBlockTimestamp 获取指定base或quote代币的最早区块时间戳
 // 对应SQL: SELECT block_timestamp FROM dex_query_v1.pairs WHERE base = ? OR "quote" = ? ORDER BY block_timestamp ASC limit 1;
 func (p *pairsDAO) GetEarliestBlockTimestamp(ctx context.Context, chainId uint64, tokenAddress string) (*int64, error) {
+	// 写死常见quote token最早池子创建时间，加速查询
+	switch chainId {
+	case 501:
+		if tokenAddress == "So11111111111111111111111111111111111111111" || tokenAddress == "So11111111111111111111111111111111111111112" {
+			timestamp := int64(1651167968000)
+			return &timestamp, nil
+		} else if tokenAddress == "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" { // USDC
+			timestamp := int64(1651167968000)
+			return &timestamp, nil
+		} else if tokenAddress == "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" { // USDT
+			timestamp := int64(1651167972000)
+			return &timestamp, nil
+		} else if tokenAddress == "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB" { // USD1
+			timestamp := int64(1755887498000)
+			return &timestamp, nil
+		}
+	case 9006:
+		if tokenAddress == "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c" { // WBNB
+			timestamp := int64(1626362416000)
+			return &timestamp, nil
+		} else if tokenAddress == "0x55d398326f99059fF775485246999027B3197955" { // USDT
+			timestamp := int64(1626362416000)
+			return &timestamp, nil
+		} else if tokenAddress == "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d" { // USD1
+			timestamp := int64(1744411964000)
+			return &timestamp, nil
+		} else if tokenAddress == "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d" { // USDC
+			timestamp := int64(1626362438000)
+			return &timestamp, nil
+		} else if tokenAddress == "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56" { // BUSD
+			timestamp := int64(1626362416000)
+			return &timestamp, nil
+		} else if tokenAddress == "0x0000000000000000000000000000000000000000" { // Fourmeme BNB
+			timestamp := int64(1751950227000)
+			return &timestamp, nil
+		}
+	}
+
 	cacheKey := utils.PairsEarliestBlockTimestampKey(chainId, tokenAddress)
 
 	// 先查本地缓存

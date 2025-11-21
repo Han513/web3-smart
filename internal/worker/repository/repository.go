@@ -47,6 +47,7 @@ type repositoryImpl struct {
 	esClient     *elasticsearch.Client
 	mainRdb      *redis.Client
 	metricsRdb   *redis.Client
+	priceRdb     *redis.Client
 	mq           *kafka.Writer
 	solanaClient *rpc.Client
 	bscClient    *ethclient.Client
@@ -81,8 +82,9 @@ func (r *repositoryImpl) init() {
 	//}
 
 	// 初始化 Elasticsearch Client
+	addresses := strings.Split(r.cfg.Elasticsearch.Addresses, ",")
 	esClient, err := elasticsearch.NewClient(elasticsearch.Config{
-		Addresses: r.cfg.Elasticsearch.Addresses,
+		Addresses: addresses,
 		Username:  r.cfg.Elasticsearch.Username,
 		Password:  r.cfg.Elasticsearch.Password,
 		Indexs: map[string]map[string]interface{}{
@@ -119,17 +121,17 @@ func (r *repositoryImpl) init() {
 	}
 
 	// 初始化 Byd Rpc
-	priceRdb := redis.NewClient(&redis.Options{
+	r.priceRdb = redis.NewClient(&redis.Options{
 		Addr:     r.cfg.Redis.Address,
 		Password: r.cfg.Redis.Password,
 		DB:       r.cfg.Redis.DBPrice,
 	})
 
-	if err := priceRdb.Ping(context.Background()).Err(); err != nil {
+	if err := r.priceRdb.Ping(context.Background()).Err(); err != nil {
 		panic("failed to connect to redis: " + err.Error())
 	}
 
-	priceCache := layeredcahe.NewWithRedisClient(priceRdb, 30*time.Second, 30*time.Second)
+	priceCache := layeredcahe.NewWithRedisClient(r.priceRdb, 30*time.Second, 30*time.Second)
 	r.bydRpc = bydrpc.NewBydRpcClient(r.cfg.BydRpcUrl, 30*time.Second, priceCache)
 
 	brokers := strings.Split(r.cfg.Kafka.Brokers, ",")
@@ -151,7 +153,7 @@ func (r *repositoryImpl) init() {
 	r.solanaClient = solana_client.Init(r.cfg.SolanaClientRawUrl)
 
 	// 初始化 DAO Manager
-	r.daoManager = dao.NewDAOManager(r.db, r.mainRdb)
+	r.daoManager = dao.NewDAOManager(&r.cfg, r.db, r.esClient, r.mainRdb)
 }
 
 func (r *repositoryImpl) GetMainRDB() *redis.Client {
@@ -160,6 +162,10 @@ func (r *repositoryImpl) GetMainRDB() *redis.Client {
 
 func (r *repositoryImpl) GetMetricsRDB() *redis.Client {
 	return r.metricsRdb
+}
+
+func (r *repositoryImpl) GetPriceRDB() *redis.Client {
+	return r.priceRdb
 }
 
 func (r *repositoryImpl) GetDB() *gorm.DB {

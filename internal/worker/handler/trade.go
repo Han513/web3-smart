@@ -15,6 +15,7 @@ type TradeHandler struct {
 	repo    repository.Repository
 	wpaServ *service.WalletPositonAnalyze
 	wisServ *service.WalletIndicatorStatistics
+	tcsServ *service.TopCardsService
 }
 
 func NewTradeHandler(cfg config.Config, logger *zap.Logger, repo repository.Repository) *TradeHandler {
@@ -24,17 +25,20 @@ func NewTradeHandler(cfg config.Config, logger *zap.Logger, repo repository.Repo
 		repo:    repo,
 		wpaServ: service.NewWalletPositonAnalyze(cfg, logger, repo),
 		wisServ: service.NewWalletIndicatorStatistics(cfg, logger, repo),
+		tcsServ: service.NewTopCardsService(cfg, logger, repo),
 	}
 }
 
 func (h *TradeHandler) HandleTrade(trade model.TradeEvent) {
-	smartMoney, holding, txType := h.wpaServ.ProcessTrade(trade)
+	smartMoney, prevHolding, currentHolding, txType := h.wpaServ.ProcessTrade(trade)
 	if smartMoney != nil {
-		h.wisServ.Statistics(trade, smartMoney, holding, txType)
+		h.wisServ.Statistics(trade, smartMoney, prevHolding, currentHolding, txType)
+		h.tcsServ.HandleSmartTrade(trade, smartMoney, txType)
 	}
 }
 
 func (h *TradeHandler) Stop() {
 	h.wpaServ.Close()
 	h.wisServ.Close()
+	h.tcsServ.Close()
 }

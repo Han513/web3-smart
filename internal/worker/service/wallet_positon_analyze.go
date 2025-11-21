@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"time"
 	"web3-smart/internal/worker/config"
 	"web3-smart/internal/worker/dao"
@@ -9,6 +10,7 @@ import (
 	"web3-smart/internal/worker/repository"
 	"web3-smart/internal/worker/writer"
 	"web3-smart/internal/worker/writer/holding"
+	missingtokeninfo "web3-smart/internal/worker/writer/missing_tokeninfo"
 	"web3-smart/pkg/utils"
 
 	"gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker/common/bip0044"
@@ -25,14 +27,18 @@ type WalletPositonAnalyze struct {
 	daoManager      *dao.DAOManager
 	holdingDbWriter *writer.AsyncBatchWriter[model.WalletHolding]
 	//holdingEsWriter *writer.AsyncBatchWriter[model.WalletHolding]
+	missingTokenInfoWriter *writer.AsyncBatchWriter[model.TradeEvent]
 }
 
 func NewWalletPositonAnalyze(cfg config.Config, logger *zap.Logger, repo repository.Repository) *WalletPositonAnalyze {
-	holdingDbWriter := writer.NewAsyncBatchWriter(logger, holding.NewDbHoldingWriter(repo.GetDB(), logger), 1000, 300*time.Millisecond, "holding_db_writer", 2)
+	holdingDbWriter := writer.NewAsyncBatchWriter(logger, holding.NewDbHoldingWriter(repo.GetDB(), logger), 1000, 300*time.Millisecond, "holding_db_writer", 3)
 	holdingDbWriter.Start(context.Background())
 
 	//holdingEsWriter := writer.NewAsyncBatchWriter(logger, holding.NewESHoldingWriter(repo.GetElasticsearchClient(), logger, cfg.Elasticsearch.HoldingsIndexName), 1000, 300*time.Millisecond, "holding_es_writer", 3)
 	//holdingEsWriter.Start(context.Background())
+
+	missingTokenInfoWriter := writer.NewAsyncBatchWriter(logger, missingtokeninfo.NewRedisMissingTokenInfoWriter(repo.GetMainRDB(), logger), 100, 300*time.Millisecond, "missing_tokeninfo_writer", 3)
+	missingTokenInfoWriter.Start(context.Background())
 
 	return &WalletPositonAnalyze{
 		cfg:             cfg,
@@ -41,29 +47,30 @@ func NewWalletPositonAnalyze(cfg config.Config, logger *zap.Logger, repo reposit
 		daoManager:      repo.GetDAOManager(),
 		holdingDbWriter: holdingDbWriter,
 		//holdingEsWriter: holdingEsWriter,
+		missingTokenInfoWriter: missingTokenInfoWriter,
 	}
 }
 
-func (s *WalletPositonAnalyze) ProcessTrade(trade model.TradeEvent) (smartMoney *model.WalletSummary, holding *model.WalletHolding, txType string) {
+func (s *WalletPositonAnalyze) ProcessTrade(trade model.TradeEvent) (smartMoney *model.WalletSummary, prevHolding *model.WalletHolding, holding *model.WalletHolding, txType string) {
 	tradeTime := trade.Event.Time
 
 	// 过滤无意义的交易
 	chainId := bip0044.NetworkNameToChainId(trade.Event.Network)
 	if chainId == 0 {
-		return nil, nil, ""
+		return nil, nil, nil, ""
 	}
 	_, inIsUSD := quotecoin.IsUsdQuoteTokens(chainId, trade.Event.BaseMint)
 	_, outIsUSD := quotecoin.IsUsdQuoteTokens(chainId, trade.Event.QuoteMint)
 	if inIsUSD && outIsUSD {
-		return nil, nil, ""
+		return nil, nil, nil, ""
 	}
 
 	// 获取代币信息
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tokenInfo, err := s.getTokenInfo(ctx, chainId, trade.Event.TokenAddress)
 	if err != nil {
-		return nil, nil, ""
+		return nil, nil, nil, ""
 	}
 
 	// 检查tags
@@ -101,27 +108,38 @@ func (s *WalletPositonAnalyze) ProcessTrade(trade model.TradeEvent) (smartMoney 
 	// 获取持仓信息
 	holding, err = s.getHoldingByWalletAndToken(ctx, chainId, trade.Event.Address, trade.Event.TokenAddress)
 	if err != nil {
-		return nil, nil, ""
+		return nil, nil, nil, ""
 	}
+
+	prevHolding = &model.WalletHolding{} // 更新前的持仓记录
+	if holding != nil {
+		prevHolding = holding.Clone()
+	}
+
+	// 更新持仓记录
 	if holding == nil {
 		holding = model.NewWalletHolding(trade, *tokenInfo, chainId, isDev, tags)
 		txType = model.TX_TYPE_BUILD
 		if holding == nil { // 如果新持仓也是nil，则返回空
-			return nil, nil, ""
+			return nil, nil, nil, ""
 		}
 	} else {
 		txType = holding.AggregateTrade(trade, *tokenInfo, isDev, tags)
 	}
 
 	// 异步写入数据库
-	hashKey := utils.MergeHashKey(trade.Event.TokenAddress, trade.Event.Time)
+	hashKey := fmt.Sprintf("%s_%s", trade.Event.Network, trade.Event.TokenAddress)
 	s.holdingDbWriter.Submit(*holding, hashKey)
 	//s.holdingEsWriter.Submit(*holding)
+
+	if smartMoney != nil && tokenInfo.Logo == "" { // 只对系统聪明钱显示负责，如果代币信息中logo为空，则记录到redis，便于后续补全
+		s.missingTokenInfoWriter.Submit(trade, trade.Event.TokenAddress)
+	}
 
 	// 更新持仓缓存
 	s.daoManager.HoldingDAO.UpdateHoldingCache(ctx, utils.HoldingKey(chainId, trade.Event.Address, trade.Event.TokenAddress), holding)
 
-	return smartMoney, holding, txType
+	return smartMoney, prevHolding, holding, txType
 }
 
 // getHoldingByWalletAndToken 通过钱包地址和代币地址查询持仓信息
@@ -158,13 +176,24 @@ func (s *WalletPositonAnalyze) getTokenInfo(ctx context.Context, chainId uint64,
 			zap.String("token_address", tokenAddress),
 			zap.Uint64("chain_id", chainId),
 			zap.Error(err))
-		return nil, err
+		// return nil, err
 	}
 	if tokenInfo == nil {
 		s.tl.Debug("未找到代币信息，给空对象",
 			zap.String("token_address", tokenAddress),
 			zap.Uint64("chain_id", chainId))
-		tokenInfo = &model.SmTokenRet{}
+		tokenInfo = &model.SmTokenRet{
+			Address: tokenAddress,
+		}
+	} else {
+		// 记录 logo 为空的情况，便于排查问题
+		if tokenInfo.Logo == "" {
+			s.tl.Debug("代币信息中 logo 为空",
+				zap.String("token_address", tokenAddress),
+				zap.Uint64("chain_id", chainId),
+				zap.String("token_symbol", tokenInfo.Symbol),
+				zap.String("token_name", tokenInfo.Name))
+		}
 	}
 	return tokenInfo, nil
 }

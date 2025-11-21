@@ -53,7 +53,7 @@ type WalletSummary struct {
 	Balance         decimal.Decimal `gorm:"column:balance;type:decimal(50,20);not null;default:0" json:"balance"`
 	BalanceUSD      decimal.Decimal `gorm:"column:balance_usd;type:decimal(50,20);not null;default:0" json:"balance_usd"`
 	ChainID         uint64          `gorm:"column:chain_id;type:int" json:"chain_id"`
-	Tags            pq.StringArray  `gorm:"column:tags;type:varchar(50)[]" json:"tags"` // smart money
+	Tags            pq.StringArray  `gorm:"column:tags;type:varchar(50)[]" json:"tags"` // smart_wallet
 	TwitterName     string          `gorm:"column:twitter_name;type:varchar(50)" json:"twitter_name"`
 	TwitterUsername string          `gorm:"column:twitter_username;type:varchar(50)" json:"twitter_username"`
 	WalletType      int             `gorm:"column:wallet_type;type:int;default:0" json:"wallet_type"`                           // 0:一般聪明钱，1:pump聪明钱，2:moonshot聪明钱
@@ -146,7 +146,7 @@ type WalletStats struct {
 	SmartMoneyCount int64   `json:"smart_money_count"`
 }
 
-func (w *WalletSummary) UpdateIndicatorStatistics(trade *TradeEvent, updatedHolding *WalletHolding, txType string) {
+func (w *WalletSummary) UpdateIndicatorStatistics(trade *TradeEvent, prevHolding, updatedHolding *WalletHolding, txType string) {
 	// 检查头像是否为空，hash(wallet addr) % 1000 作为头像
 	// 格式: https://uploads.bydfi.in/moonx/avatar/289.svg
 	if strings.TrimSpace(w.Avatar) == "" {
@@ -181,16 +181,16 @@ func (w *WalletSummary) UpdateIndicatorStatistics(trade *TradeEvent, updatedHold
 		// 更新盈亏数据
 		price := decimal.NewFromFloat(trade.Event.Price)
 		fromTokenAmount := decimal.NewFromFloat(trade.Event.FromTokenAmount)
-		curTxPnl := price.Sub(updatedHolding.AvgPrice).Mul(fromTokenAmount)
+		curTxPnl := price.Sub(prevHolding.AvgPrice).Mul(fromTokenAmount)
 		w.PNL30d = w.PNL30d.Add(curTxPnl)
 		w.PNL7d = w.PNL7d.Add(curTxPnl)
 		w.PNL1d = w.PNL1d.Add(curTxPnl)
 
 		var curTxPercentage decimal.Decimal
-		if updatedHolding.AvgPrice.GreaterThan(decimal.Zero) {
-			curTxPercentage = price.Div(updatedHolding.AvgPrice).Sub(decimal.NewFromInt(1)).Mul(decimal.NewFromInt(100))
+		if prevHolding.AvgPrice.GreaterThan(decimal.Zero) {
+			curTxPercentage = price.Div(prevHolding.AvgPrice).Sub(decimal.NewFromInt(1)).Mul(decimal.NewFromInt(100))
 		} else {
-			curTxPercentage = decimal.Zero
+			curTxPercentage = updatedHolding.PNLPercentage.Sub(prevHolding.PNLPercentage)
 		}
 		w.PNLPercentage30d = w.PNLPercentage30d.Add(curTxPercentage)
 		w.PNLPercentage30d = decimal.Max(decimal.NewFromFloat(-100), w.PNLPercentage30d) // 限制最大亏损在-100%

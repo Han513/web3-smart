@@ -89,13 +89,13 @@ func (j *SmartWalletClassifier) Run(ctx context.Context) error {
 
 			if passed {
 				newTags := append([]string{}, w.Tags...)
-				newTags = append(newTags, "smart money")
+				newTags = append(newTags, model.TAG_SMART_MONEY)
 				if err := db.WithContext(ctx).Model(&model.WalletSummary{}).
 					Where("wallet_address = ?", w.WalletAddress).
 					Update("tags", newTags).Error; err != nil {
-					j.logger.Error("append smart money tag failed", zap.String("wallet", w.WalletAddress), zap.Error(err))
+					j.logger.Error("append smart_wallet tag failed", zap.String("wallet", w.WalletAddress), zap.Error(err))
 				} else {
-					j.logger.Info("appended smart money tag", zap.String("wallet", w.WalletAddress))
+					j.logger.Info("appended smart_wallet tag", zap.String("wallet", w.WalletAddress))
 				}
 			}
 
@@ -110,7 +110,7 @@ func (j *SmartWalletClassifier) Run(ctx context.Context) error {
 
 func hasSmartMoneyTag(tags []string) bool {
 	for _, t := range tags {
-		if strings.EqualFold(strings.TrimSpace(t), "smart money") {
+		if strings.EqualFold(strings.TrimSpace(t), model.TAG_SMART_MONEY) {
 			return true
 		}
 	}

@@ -28,13 +28,12 @@ type Config struct {
 
 // KafkaConfig Kafka 配置
 type KafkaConfig struct {
-	Brokers      string `mapstructure:"brokers"`
-	TopicTrade   string `mapstructure:"topic_trade"`
-	TopicBalance string `mapstructure:"topic_balance"`
-	TopicData    string `mapstructure:"topic_data"`
-	TopicSM      string `mapstructure:"topic_sm"`
-	TopicDev     string `mapstructure:"topic_dev"`
-	GroupID      string `mapstructure:"group_id"`
+	Brokers         string `mapstructure:"brokers"`
+	TopicTrade      string `mapstructure:"topic_trade"`
+	TopicBalance    string `mapstructure:"topic_balance"`
+	TopicData       string `mapstructure:"topic_data"`
+	TopicSmartTrade string `mapstructure:"topic_smart_trade"`
+	GroupID         string `mapstructure:"group_id"`
 }
 
 // RedisConfig Redis 配置
@@ -61,11 +60,12 @@ type SelectDBConfig struct {
 }
 
 type ElasticsearchConfig struct {
-	Addresses         []string `mapstructure:"addresses"`
-	Username          string   `mapstructure:"username"`
-	Password          string   `mapstructure:"password"`
-	HoldingsIndexName string   `mapstructure:"holdings_index_name"`
-	WalletsIndexName  string   `mapstructure:"wallets_index_name"`
+	Addresses           string `mapstructure:"addresses"`
+	Username            string `mapstructure:"username"`
+	Password            string `mapstructure:"password"`
+	HoldingsIndexName   string `mapstructure:"holdings_index_name"`
+	WalletsIndexName    string `mapstructure:"wallets_index_name"`
+	Web3TokensIndexName string `mapstructure:"web3tokens_index_name"`
 }
 
 // LarkConfig Lark 配置
@@ -101,6 +101,26 @@ func InitConfig() Config {
 	viper.SetConfigName("config.worker")
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath("./config/")
+
+	viper.BindEnv("kafka.brokers", "MOONX_KAFKA_HOSTS")
+
+	viper.BindEnv("redis.address", "MOONX_REDIS_ADDRESS")
+	viper.BindEnv("redis.password", "MOONX_REDIS_PWD")
+
+	viper.BindEnv("postgres.dsn", "MOONX_PG_DSN")
+
+	viper.BindEnv("selectdb.dsn", "MOONX_SELECTDB_DSN")
+	viper.BindEnv("selectdb.base_url", "MOONX_SELECTDB_BASE_URL")
+	viper.BindEnv("selectdb.username", "MOONX_SELECTDB_USERNAME")
+	viper.BindEnv("selectdb.password", "MOONX_SELECTDB_PASSWORD")
+
+	viper.BindEnv("elasticsearch.addresses", "MOONX_ELASTICSEARCH_ADDRESSES")
+	viper.BindEnv("elasticsearch.username", "MOONX_ELASTICSEARCH_USERNAME")
+	viper.BindEnv("elasticsearch.password", "MOONX_ELASTICSEARCH_PASSWORD")
+
+	viper.BindEnv("moralis.api_key", "MOONX_MORALIS_API_KEY")
+
+	viper.BindEnv("lark.webhook", "MOONX_LARK_WEBHOOK")
 
 	err := viper.ReadInConfig()
 	if err != nil {

@@ -4,57 +4,60 @@ log:
 
 # Kafka 配置
 kafka:
-  brokers: "alikafka-pre-public-intl-sg-x1e4eic8i02-1-vpc.alikafka.aliyuncs.com:9092,alikafka-pre-public-intl-sg-x1e4eic8i02-2-vpc.alikafka.aliyuncs.com:9092,alikafka-pre-public-intl-sg-x1e4eic8i02-3-vpc.alikafka.aliyuncs.com:9092"
+  brokers: "" # 环境变量 MOONX_KAFKA_HOSTS
   topic_trade: "web3_trade_events"
   topic_data: "web3_data_events"
   topic_balance: "web3_block_balance_events"
-  topic_sm: "web3_trade_sm_events"
-  topic_dev: "web3_token_dev_events"
+  topic_smart_trade: "web3_smart_trade_events"
   group_id: "web3_smart_consumer_dev"
 
-byd_rpc_url: http://byd-host:30032
-bsc_client_rawurl: http://nlb-vr27uf1tvi312e38ai.eu-central-1.nlb.aliyuncsslbintl.com:64021
-solana_client_rawurl: https://jadeite-greasily-xykrmnpgkw-dedicated.helius-rpc.com?api-key=90e3661e-4c5f-4e6b-af81-7aed2fd0f5be
+# byd_rpc_url: http://byd-host:30032
+# bsc_client_rawurl: http://nlb-vr27uf1tvi312e38ai.eu-central-1.nlb.aliyuncsslbintl.com:64021
+# solana_client_rawurl: https://jadeite-greasily-xykrmnpgkw-dedicated.helius-rpc.com?api-key=90e3661e-4c5f-4e6b-af81-
+
+byd_rpc_url: "" # 环境变量 BYDRPC
+bsc_client_rawurl: "" # 环境变量 BSC_CLIENT_RAWURL
+solana_client_rawurl: "" # 环境变量 SOLANA_CLIENT_RAWURL
 
 # Redis 配置
 redis:
-  address: "r-3ns7cwzhnr26mqko6g.redis.rds.aliyuncs.com:6379"
-  password: "JCESX2B318mJa"
+  address: "" # 环境变量 MOONX_REDIS_ADDRESS
+  password: "" # 环境变量 MOONX_REDIS_PWD
   db: 7
   db_metrics: 0
   db_price: 1
 
 # PostgreSQL 配置
 postgres:
-  dsn: "host=postgres-host user=test_pg01_rwuser01 password=E2#dN4c6d5Mz dbname=dex_db port=5432 sslmode=disable search_path=dex_query_v1"
+  dsn: "" # 环境变量 MOONX_PG_DSN
 
 # SelectDB 配置
 selectdb:
-  dsb: "test_selectdb_teemo:x$dKds7f%JqaK@tcp(selectdb-sg-o51479b4e02.selectdbfe.rds.aliyuncs.com:9030)/web3_trade?charset=utf8mb4&parseTime=True&loc=Local"
-  base_url: "http://selectdb-sg-o51479b4e02.selectdbfe.rds.aliyuncs.com:8080"
+  dsn: "" # 环境变量 MOONX_SELECTDB_DSN
+  base_url: "" # 环境变量 MOONX_SELECTDB_BASE_URL
   database: "smart_money"
-  username: "test_selectdb_teemo"
-  password: "x$dKds7f%JqaK"
+  username: "" # 环境变量 MOONX_SELECTDB_USERNAME
+  password: "" # 环境变量 MOONX_SELECTDB_PASSWORD
 
 # Elasticsearch 配置
 elasticsearch:
-  addresses:
-    - "http://es-sg-2ci4eq22t0001gfig.elasticsearch.aliyuncs.com:9200"
-  username: "elastic"
-  password: "J4U#dh8Kd1Fz"
+  addresses: "" # 环境变量，多个用','分割 MOONX_ELASTICSEARCH_ADDRESSES
+  username: "" # 环境变量 MOONX_ELASTICSEARCH_USERNAME
+  password: "" # 环境变量 MOONX_ELASTICSEARCH_PASSWORD
   holdings_index_name: "web3_smart_holdings"
   wallets_index_name: "web3_smart_wallets"
+  web3tokens_index_name: "web3_tokens"
 
 moralis:
   base_url: "https://deep-index.moralis.io"
   gateway_url: "https://solana-gateway.moralis.io"
-  api_key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6Ijg4M2Q4OWUwLWM4MDYtNGRjOC04MDE5LTk5NTdiMDcyYzViOSIsIm9yZ0lkIjoiNDM5MTQyIiwidXNlcklkIjoiNDUxNzg1IiwidHlwZUlkIjoiM2U3YjE1MmYtZmU2ZC00Y2Y4LTk3ZGUtMDlhN2RkMzYyZjI3IiwidHlwZSI6IlBST0pFQ1QiLCJpYXQiOjE3NDM1MTgzOTIsImV4cCI6NDg5OTI3ODM5Mn0.6Se9ckq52yREVMUo0EegSkt0pmlxwF1OEYPu7h0Ktg0"
+  api_key: "" # 环境变量 MOONX_MORALIS_API_KEY
   rate_limit: 120
   timeout: 30
 
 
 lark:
-  webhook: "https://open.larksuite.com/open-apis/bot/v2/hook/71e41f11-fc0d-423b-b838-af86c88ab123"
+  webhook: "" # 环境变量 MOONX_LARK_WEBHOOK
 
 # smart-money worker
 worker:

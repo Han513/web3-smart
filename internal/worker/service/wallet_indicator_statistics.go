@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"time"
 	"web3-smart/internal/worker/config"
 	"web3-smart/internal/worker/dao"
@@ -29,16 +31,23 @@ type WalletIndicatorStatistics struct {
 	walletDbWriter *writer.AsyncBatchWriter[model.WalletSummary]
 	walletEsWriter *writer.AsyncBatchWriter[model.WalletSummary]
 	txDbWriter     *writer.AsyncBatchWriter[model.WalletTransaction]
+	txKafkaWriter  *writer.AsyncBatchWriter[model.WalletTransaction]
+	latestTrades   *LatestTradesService
+	pairsService   *TransactionPairsService
 }
 
 func NewWalletIndicatorStatistics(cfg config.Config, logger *zap.Logger, repo repository.Repository) *WalletIndicatorStatistics {
 	walletDbWriter := writer.NewAsyncBatchWriter(logger, wallet.NewDbWalletWriter(repo.GetDB(), logger), 1000, 300*time.Millisecond, "wallet_db_writer", 1)
 	walletEsWriter := writer.NewAsyncBatchWriter(logger, wallet.NewESWalletWriter(repo.GetElasticsearchClient(), logger, cfg.Elasticsearch.WalletsIndexName), 1000, 300*time.Millisecond, "wallet_es_writer", 1)
 	txDbWriter := writer.NewAsyncBatchWriter(logger, transaction.NewDbTransactionWriter(repo.GetDB(), logger), 1000, 300*time.Millisecond, "tx_db_writer", 1)
+	txKafkaWriter := writer.NewAsyncBatchWriter(logger, transaction.NewKafkaSmartTxWriter(repo.GetMQ(), logger, cfg.Kafka.TopicSmartTrade), 1000, 100*time.Millisecond, "tx_kafka_writer", 1)
+	latestTrades := NewLatestTradesService(cfg, logger, repo)
+	pairsService := NewTransactionPairsService(cfg, logger, repo)
 	// 初始化后立即启动所有的 AsyncBatchWriter
 	walletDbWriter.Start(context.Background())
 	walletEsWriter.Start(context.Background())
 	txDbWriter.Start(context.Background())
+	txKafkaWriter.Start(context.Background())
 
 	return &WalletIndicatorStatistics{
 		cfg:            cfg,
@@ -48,10 +57,13 @@ func NewWalletIndicatorStatistics(cfg config.Config, logger *zap.Logger, repo re
 		walletDbWriter: walletDbWriter,
 		walletEsWriter: walletEsWriter,
 		txDbWriter:     txDbWriter,
+		txKafkaWriter:  txKafkaWriter,
+		latestTrades:   latestTrades,
+		pairsService:   pairsService,
 	}
 }
 
-func (s *WalletIndicatorStatistics) Statistics(trade model.TradeEvent, smartMoney *model.WalletSummary, updatedHolding *model.WalletHolding, txType string) {
+func (s *WalletIndicatorStatistics) Statistics(trade model.TradeEvent, smartMoney *model.WalletSummary, prevHolding, updatedHolding *model.WalletHolding, txType string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -84,15 +96,26 @@ func (s *WalletIndicatorStatistics) Statistics(trade model.TradeEvent, smartMone
 	}
 
 	// 更新wallet表
-	smartMoney.UpdateIndicatorStatistics(&trade, updatedHolding, txType)
+	smartMoney.UpdateIndicatorStatistics(&trade, prevHolding, updatedHolding, txType)
 
 	// 更新tx表
-	tx := model.NewWalletTransaction(trade, smartMoney, updatedHolding, txType, fromTokenInfo, toTokenInfo)
+	tx := model.NewWalletTransaction(trade, smartMoney, prevHolding, updatedHolding, txType, fromTokenInfo, toTokenInfo)
 
-	hashKey := utils.MergeHashKey(trade.Event.TokenAddress, trade.Event.Time)
+	hashKey := trade.Event.TokenAddress
 	s.walletDbWriter.Submit(*smartMoney, hashKey)
 	s.walletEsWriter.Submit(*smartMoney, hashKey)
 	s.txDbWriter.Submit(*tx, hashKey)
+	s.txKafkaWriter.Submit(*tx, hashKey)
+
+	// 记录系统聪明钱最新成交（用于监控页「最新成交」展示）
+	if s.latestTrades != nil {
+		s.latestTrades.Record(tx)
+	}
+
+	// 更新交易对榜单及 token 级别的聚合数据（用于「交易对」监控页）
+	if s.pairsService != nil {
+		s.pairsService.Record(tx)
+	}
 
 	// 更新wallet缓存
 	s.daoManager.WalletDAO.UpdateWalletCache(ctx, utils.WalletSummaryKey(smartMoney.ChainID, smartMoney.WalletAddress), smartMoney)
@@ -152,13 +175,29 @@ func (s *WalletIndicatorStatistics) getWalletTotalValUSD(ctx context.Context, bi
 			continue
 		}
 
-		var err error
+		// var err error
 		quotePriceUsd := float64(1) // default is USD token price
 		if _, isUsdQuote := quotecoin.IsUsdQuoteTokens(bip0044ChainId, quoteAddr); !isUsdQuote {
-			quotePriceUsd, err = s.repo.GetBydRpc().GetPrice(ctx, nativeTokenSym, "USDT")
+			// quotePriceUsd, err = s.repo.GetBydRpc().GetPrice(ctx, nativeTokenSym, "USDT")
+			// if err != nil {
+			// 	s.tl.Warn("get quote token price usd err",
+			// 		zap.String("native_token_sym", nativeTokenSym),
+			// 		zap.Error(err))
+			// 	continue
+			// }
+
+			priceStr, err := s.repo.GetPriceRDB().Get(ctx, fmt.Sprintf("BYD:price:%s_USDT", nativeTokenSym)).Result()
 			if err != nil {
 				s.tl.Warn("get quote token price usd err",
 					zap.String("native_token_sym", nativeTokenSym),
+					zap.Error(err))
+				continue
+			}
+			quotePriceUsd, err = strconv.ParseFloat(priceStr, 64)
+			if err != nil {
+				s.tl.Warn("parse quote token price usd err",
+					zap.String("native_token_sym", nativeTokenSym),
+					zap.String("price_str", priceStr),
 					zap.Error(err))
 				continue
 			}

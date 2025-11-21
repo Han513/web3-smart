@@ -21,6 +21,7 @@ type Repository interface {
 	//DB
 	GetMainRDB() RedisClient
 	GetMetricsRDB() RedisClient
+	GetPriceRDB() RedisClient
 	GetDB() DBClient
 	GetMQ() MQClient
 	GetSelectDB() DBClient

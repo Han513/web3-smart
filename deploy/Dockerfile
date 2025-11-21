@@ -23,44 +23,15 @@ RUN CGO_ENABLED=0 go build -o prepare_cache cmd/script/main.go
 
 
 # ---------- Producer 运行阶段及部署运行程序 ----------
-FROM ubuntu:22.04 AS runner
+FROM alpine:3.18.2 AS runner
 
-# 设置 DEBIAN_FRONTEND 防止 tzdata 交互
-ENV DEBIAN_FRONTEND=noninteractive
-
-# 更新 apt 源并安装 tzdata 设置加载为中国本地时间
-RUN apt-get update && \
-    apt-get install -y ca-certificates && \
-    sed -i 's@//archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list && \
-    sed -i 's@//security.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list && \
-    apt-get update && \
-    apt-get install -y tzdata && \
-    ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
-    dpkg-reconfigure --frontend noninteractive tzdata && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# 设置时区
+RUN apk add --no-cache tzdata coreutils&& \
+    cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo "Asia/Shanghai" > /etc/timezone
 
 WORKDIR /root
 COPY --from=builder /app/app /root/
 CMD ["/root/app"]
 
 
-# ---------- Producer 运行阶段及部署运行程序 ----------
-FROM ubuntu:22.04 AS prepare_runner
-
-# 设置 DEBIAN_FRONTEND 防止 tzdata 交互
-ENV DEBIAN_FRONTEND=noninteractive
-
-# 更新 apt 源并安装 tzdata 设置加载为中国本地时间
-RUN apt-get update && \
-    apt-get install -y ca-certificates && \
-    sed -i 's@//archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list && \
-    sed -i 's@//security.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list && \
-    apt-get update && \
-    apt-get install -y tzdata && \
-    ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
-    dpkg-reconfigure --frontend noninteractive tzdata && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /root
-COPY --from=builder /app/prepare_cache /root/
-CMD ["/root/prepare_cache"]

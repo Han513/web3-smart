@@ -3,17 +3,19 @@ package dao
 import (
 	"context"
 	"fmt"
+	"web3-smart/internal/worker/config"
+	"web3-smart/pkg/elasticsearch"
 
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
 // ExampleUsage 展示如何使用DAO
-func ExampleUsage(db *gorm.DB, rdb *redis.Client) {
+func ExampleUsage(cfg *config.Config, db *gorm.DB, es *elasticsearch.Client, rdb *redis.Client) {
 	ctx := context.Background()
 
 	// 创建DAO管理器
-	daoManager := NewDAOManager(db, rdb)
+	daoManager := NewDAOManager(cfg, db, es, rdb)
 
 	// 使用HoldingDAO
 	wallet := "0x1234567890abcdef1234567890abcdef12345678"

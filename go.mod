@@ -9,6 +9,7 @@ require (
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/gagliardetto/solana-go v1.13.0
 	github.com/go-viper/mapstructure/v2 v2.2.1
+	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.10.9
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/prometheus/client_golang v1.22.0
@@ -62,7 +63,6 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-sql-driver/mysql v1.9.2 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
@@ -119,6 +119,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker => gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker.git v0.3.0
+replace gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker => gitlab.codetech.pro/web3/chain_data/chain/dex_data_broker.git v0.3.8
 
 replace gitlab.codetech.pro/web3/chain_data/chain/dex_data_interface => gitlab.codetech.pro/web3/chain_data/chain/dex_data_interface.git v0.0.7

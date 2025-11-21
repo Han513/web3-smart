@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"go.uber.org/zap"
@@ -87,14 +88,14 @@ func (c *Client) BulkWrite(ctx context.Context, operations []BulkOperation) erro
 		// }
 
 		// 写入操作行
-		actionBytes, _ := json.Marshal(actionLine)
+		actionBytes, _ := sonic.Marshal(actionLine)
 		buf.Write(actionBytes)
 		buf.WriteByte('\n')
 
 		// 如果是index或create操作，需要写入文档内容
 		if op.Action == "index" || op.Action == "create" || op.Action == "update" {
 			if op.Document != nil {
-				docBytes, _ := json.Marshal(op.Document)
+				docBytes, _ := sonic.Marshal(op.Document)
 				buf.Write(docBytes)
 				buf.WriteByte('\n')
 			}
@@ -123,7 +124,7 @@ func (c *Client) BulkWrite(ctx context.Context, operations []BulkOperation) erro
 
 // CreateIndex 创建索引
 func (c *Client) CreateIndex(ctx context.Context, indexName string, mapping map[string]interface{}) error {
-	mappingJSON, err := json.Marshal(mapping)
+	mappingJSON, err := sonic.Marshal(mapping)
 	if err != nil {
 		return fmt.Errorf("failed to marshal mapping: %w", err)
 	}
@@ -149,7 +150,7 @@ func (c *Client) CreateIndex(ctx context.Context, indexName string, mapping map[
 
 // SearchWithRouting 带routing的搜索
 func (c *Client) SearchWithRouting(ctx context.Context, indexName, routing string, query map[string]interface{}) (*SearchResult, error) {
-	queryJSON, err := json.Marshal(query)
+	queryJSON, err := sonic.Marshal(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal query: %w", err)
 	}
@@ -180,7 +181,7 @@ func (c *Client) SearchWithRouting(ctx context.Context, indexName, routing strin
 
 // Search 普通搜索（不指定 routing）
 func (c *Client) Search(ctx context.Context, indexName string, query map[string]interface{}) (*SearchResult, error) {
-	queryJSON, err := json.Marshal(query)
+	queryJSON, err := sonic.Marshal(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal query: %w", err)
 	}
@@ -227,4 +228,105 @@ type Hit struct {
 	ID     string                 `json:"_id"`
 	Score  float64                `json:"_score"`
 	Source map[string]interface{} `json:"_source"`
+}
+
+// Get 根据文档ID获取文档
+func (c *Client) Get(ctx context.Context, indexName string, docID string) (map[string]interface{}, error) {
+	req := esapi.GetRequest{
+		Index:      indexName,
+		DocumentID: docID,
+	}
+
+	res, err := req.Do(ctx, c.es)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute get request: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		if res.StatusCode == 404 {
+			return nil, fmt.Errorf("document not found, status code: %d", res.StatusCode) // 文档不存在
+		}
+		return nil, fmt.Errorf("get request error: %s, status code: %d", res.String(), res.StatusCode)
+	}
+
+	var result struct {
+		Source map[string]interface{} `json:"_source"`
+		Found  bool                   `json:"found"`
+	}
+
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode get result: %w", err)
+	}
+
+	if !result.Found {
+		return nil, fmt.Errorf("document not found, status code: %d", res.StatusCode) // 文档不存在
+	}
+
+	return result.Source, nil
+}
+
+// MgetDoc represents a document ID to retrieve
+type MgetDoc struct {
+	ID    string `json:"_id"`
+	Index string `json:"_index"`
+}
+
+// MgetResult represents the result of a multi-get operation
+type MgetResult struct {
+	Docs []MgetDocResult `json:"docs"`
+}
+
+// MgetDocResult represents a single document result from mget
+type MgetDocResult struct {
+	Index  string                 `json:"_index"`
+	ID     string                 `json:"_id"`
+	Found  bool                   `json:"found"`
+	Source map[string]interface{} `json:"_source,omitempty"`
+}
+
+// Mget retrieves multiple documents by their IDs
+func (c *Client) Mget(ctx context.Context, indexName string, docIDs []string) (*MgetResult, error) {
+	if len(docIDs) == 0 {
+		return &MgetResult{Docs: []MgetDocResult{}}, nil
+	}
+
+	// 构建 mget 请求体
+	docs := make([]MgetDoc, len(docIDs))
+	for i, id := range docIDs {
+		docs[i] = MgetDoc{
+			ID:    id,
+			Index: indexName,
+		}
+	}
+
+	body := map[string]interface{}{
+		"docs": docs,
+	}
+
+	bodyJSON, err := sonic.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal mget request: %w", err)
+	}
+
+	req := esapi.MgetRequest{
+		Body: strings.NewReader(string(bodyJSON)),
+	}
+
+	res, err := req.Do(ctx, c.es)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute mget request: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		return nil, fmt.Errorf("mget request error: %s", res.String())
+	}
+
+	var result MgetResult
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode mget result: %w", err)
+	}
+
+	return &result, nil
 }

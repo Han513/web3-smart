@@ -22,6 +22,11 @@ func NewLogger(serviceName string) *zap.Logger {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		panic(err)
 	}
+	panicFileName := filepath.Join(logDir, serviceName+".panic")
+	panicFile, err := os.Create(panicFileName)
+	if err == nil {
+		os.Stderr = panicFile
+	}
 
 	logFile := filepath.Join(logDir, serviceName+".log")
 

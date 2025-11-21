@@ -30,9 +30,9 @@ type WalletHolding struct {
 	PNLPercentage     decimal.Decimal `gorm:"column:pnl_percentage;type:decimal(50,20);not null;default:0" json:"pnl_percentage"`         // 已实现盈亏百分比（累加）
 	AvgPrice          decimal.Decimal `gorm:"column:avg_price;type:decimal(50,20);not null;default:0" json:"avg_price"`                   // 平均买入价USD
 	CurrentTotalCost  decimal.Decimal `gorm:"column:current_total_cost;type:decimal(50,20);not null;default:0" json:"current_total_cost"` // 当前持仓总花费成本USD
-	MarketCap         decimal.Decimal `gorm:"column:marketcap;type:decimal(50,20);not null;default:0" json:"marketcap"`                   // 买入/卖出时的市值USD
+	MarketCap         decimal.Decimal `gorm:"column:marketcap;type:decimal(50,20);not null;default:0" json:"marketcap"`                   // 买入/卖出时的平均市值USD
 	IsDev             bool            `gorm:"column:is_dev;type:boolean;not null;default:false" json:"is_dev"`                            // 是否是该token dev
-	Tags              pq.StringArray  `gorm:"column:tags;type:varchar(50)[]" json:"tags"`                                                 // smart money, sniper...
+	Tags              pq.StringArray  `gorm:"column:tags;type:varchar(50)[]" json:"tags"`                                                 // smart_wallet, sniper...
 
 	// 历史累计状态
 	HistoricalBuyAmount  decimal.Decimal `gorm:"column:historical_buy_amount;type:decimal(50,20);not null;default:0" json:"historical_buy_amount"`
@@ -54,7 +54,7 @@ func (w *WalletHolding) TableName() string {
 }
 
 func NewWalletHolding(trade TradeEvent, tokenInfo SmTokenRet, chainId uint64, isDev bool, tags []string) *WalletHolding {
-	if trade.Event.Side == "sell" {
+	if trade.Event.Side == TX_TYPE_SELL {
 		return nil
 	}
 
@@ -94,9 +94,6 @@ func (w *WalletHolding) AggregateTrade(trade TradeEvent, tokenInfo SmTokenRet, i
 
 	totalSupply := tokenInfo.Supply
 	marketCap := w.MarketCap
-	if totalSupply != nil {
-		marketCap = totalSupply.Mul(decimal.NewFromFloat(trade.Event.Price))
-	}
 
 	w.TokenIcon = tokenInfo.Logo
 	w.TokenName = tokenInfo.Symbol
@@ -115,15 +112,19 @@ func (w *WalletHolding) AggregateTrade(trade TradeEvent, tokenInfo SmTokenRet, i
 			w.UnrealizedProfits = decimal.Zero
 			txType = TX_TYPE_BUILD
 		}
-        tokenAmount := decimal.NewFromFloat(trade.Event.ToTokenAmount)
-        price := decimal.NewFromFloat(trade.Event.Price)
-        volumeUsd := decimal.NewFromFloat(trade.Event.VolumeUsd)
+		tokenAmount := decimal.NewFromFloat(trade.Event.ToTokenAmount)
+		price := decimal.NewFromFloat(trade.Event.Price)
+		volumeUsd := decimal.NewFromFloat(trade.Event.VolumeUsd)
 
 		w.Amount = w.Amount.Add(tokenAmount)
 		w.ValueUSD = w.Amount.Mul(price)
 		w.CurrentTotalCost = w.CurrentTotalCost.Add(volumeUsd)
 		if w.Amount.GreaterThan(decimal.Zero) {
 			w.AvgPrice = w.CurrentTotalCost.Div(w.Amount)
+		}
+
+		if totalSupply != nil {
+			marketCap = totalSupply.Mul(w.AvgPrice)
 		}
 		w.MarketCap = marketCap
 		w.UnrealizedProfits = w.ValueUSD.Sub(w.CurrentTotalCost)
@@ -136,10 +137,14 @@ func (w *WalletHolding) AggregateTrade(trade TradeEvent, tokenInfo SmTokenRet, i
 
 		// pnl = 卖出价值USD - 卖出数量 * 平均买入价
 		sellAmount := decimal.NewFromFloat(trade.Event.FromTokenAmount)
-		sellValueUSD := decimal.NewFromFloat(trade.Event.VolumeUsd)
-        price := decimal.NewFromFloat(trade.Event.Price)
+		if sellAmount.GreaterThan(w.Amount) { // 如果卖出数量大于持仓数量，则卖出数量等于持仓数量（防止出现夸张pnl percent）
+			sellAmount = w.Amount
+		}
+		price := decimal.NewFromFloat(trade.Event.Price)
+		sellValueUSD := sellAmount.Mul(price)
 
-		pnlDelta := sellValueUSD.Sub(sellAmount.Mul(w.AvgPrice))
+		costBasis := sellAmount.Mul(w.AvgPrice) // 卖出数量的成本USD
+		pnlDelta := sellValueUSD.Sub(costBasis)
 		w.PNL = w.PNL.Add(pnlDelta)
 		if w.HistoricalBuyCost.GreaterThan(decimal.Zero) {
 			pnlPercentage := w.PNL.Div(w.HistoricalBuyCost).Mul(decimal.NewFromInt(100))
@@ -148,14 +153,18 @@ func (w *WalletHolding) AggregateTrade(trade TradeEvent, tokenInfo SmTokenRet, i
 
 		w.Amount = w.Amount.Sub(sellAmount)
 		w.ValueUSD = w.Amount.Mul(price)
-		// 使用成本基礎扣減，而非成交金額，避免均價被錯誤拉低/拉高
-		costBasis := w.AvgPrice.Mul(sellAmount)
+		// 避免均價和花费降低至负值
+		// 当前持仓花费扣减掉这次卖出数量所花费的成本的USD（收回多少成本），如果最后成本低于0则设置为0
 		w.CurrentTotalCost = w.CurrentTotalCost.Sub(costBasis)
-		if w.CurrentTotalCost.LessThan(decimal.NewFromFloat(0)) && w.CurrentTotalCost.GreaterThan(decimal.NewFromFloat(-1e-9)) {
+		if w.CurrentTotalCost.LessThan(decimal.Zero) {
 			w.CurrentTotalCost = decimal.Zero
 		}
 		if w.Amount.GreaterThan(decimal.Zero) {
 			w.AvgPrice = w.CurrentTotalCost.Div(w.Amount)
+		}
+
+		if totalSupply != nil {
+			marketCap = totalSupply.Mul(w.AvgPrice)
 		}
 		w.MarketCap = marketCap
 		w.UnrealizedProfits = w.ValueUSD.Sub(w.CurrentTotalCost)
@@ -174,6 +183,44 @@ func (w *WalletHolding) AggregateTrade(trade TradeEvent, tokenInfo SmTokenRet, i
 	}
 
 	return txType
+}
+
+func (w *WalletHolding) Clone() *WalletHolding {
+	if w == nil {
+		return nil
+	}
+
+	positionOpenedAt := int64(0)
+	if w.PositionOpenedAt != nil {
+		positionOpenedAt = *w.PositionOpenedAt
+	}
+	return &WalletHolding{
+		ChainID:              w.ChainID,
+		WalletAddress:        w.WalletAddress,
+		TokenAddress:         w.TokenAddress,
+		TokenIcon:            w.TokenIcon,
+		TokenName:            w.TokenName,
+		Amount:               w.Amount,
+		ValueUSD:             w.ValueUSD,
+		UnrealizedProfits:    w.UnrealizedProfits,
+		PNL:                  w.PNL,
+		PNLPercentage:        w.PNLPercentage,
+		AvgPrice:             w.AvgPrice,
+		CurrentTotalCost:     w.CurrentTotalCost,
+		MarketCap:            w.MarketCap,
+		IsDev:                w.IsDev,
+		Tags:                 append([]string{}, w.Tags...),
+		HistoricalBuyAmount:  w.HistoricalBuyAmount,
+		HistoricalSellAmount: w.HistoricalSellAmount,
+		HistoricalBuyCost:    w.HistoricalBuyCost,
+		HistoricalSellValue:  w.HistoricalSellValue,
+		HistoricalBuyCount:   w.HistoricalBuyCount,
+		HistoricalSellCount:  w.HistoricalSellCount,
+		PositionOpenedAt:     &positionOpenedAt,
+		LastTransactionTime:  w.LastTransactionTime,
+		UpdatedAt:            w.UpdatedAt,
+		CreatedAt:            w.CreatedAt,
+	}
 }
 
 // ToESDocument converts WalletHolding to map with float64 values for ES indexing

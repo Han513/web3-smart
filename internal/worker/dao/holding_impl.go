@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"time"
+	"web3-smart/internal/worker/config"
 	"web3-smart/internal/worker/model"
 	"web3-smart/pkg/utils"
 
@@ -15,15 +16,17 @@ import (
 
 // holdingDAO 实现HoldingDAO接口
 type holdingDAO struct {
+	cfg        *config.Config
 	db         *gorm.DB
 	rds        *redis.Client
 	localCache *cache.Cache
 }
 
 // NewHoldingDAO 创建HoldingDAO实例
-func NewHoldingDAO(db *gorm.DB, rds *redis.Client) HoldingDAO {
+func NewHoldingDAO(cfg *config.Config, db *gorm.DB, rds *redis.Client) HoldingDAO {
 	localCache := cache.New(10*time.Minute, time.Minute)
 	return &holdingDAO{
+		cfg:        cfg,
 		db:         db,
 		rds:        rds,
 		localCache: localCache,
@@ -156,8 +159,8 @@ func (h *holdingDAO) GetByChainAndWallet(ctx context.Context, chainID uint64, wa
 // GetActiveHoldings 获取未清仓的持仓信息
 func (h *holdingDAO) GetActiveHoldings(ctx context.Context, walletAddress string) ([]*model.WalletHolding, error) {
 	var holdings []*model.WalletHolding
-    err := h.db.WithContext(ctx).
-        Where("wallet_address = ? AND amount > 0", walletAddress).
+	err := h.db.WithContext(ctx).
+		Where("wallet_address = ? AND amount > 0", walletAddress).
 		Order("updated_at DESC").
 		Find(&holdings).Error
 

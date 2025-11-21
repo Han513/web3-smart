@@ -24,4 +24,7 @@ type TokenDAO interface {
 
 	// GetBySymbol 通过symbol查询token
 	GetBySymbol(ctx context.Context, chainID uint64, symbol string) ([]*model.Token, error)
+
+	// UpdateTokenInfoCache 更新token info缓存
+	UpdateTokenInfoCache(ctx context.Context, cacheKey string, tokenInfo *model.SmTokenRet)
 }

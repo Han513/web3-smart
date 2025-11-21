@@ -1,3 +1,5 @@
+SET search_path = dex_query_v1, public, dex_query, extensions, pg_catalog;
+
 -- 创建主表
 CREATE TABLE dex_query_v1.t_smart_transaction (
   id bigserial,
@@ -87,3 +89,8 @@ CREATE INDEX idx_token_address ON dex_query_v1.t_smart_transaction (token_addres
 
 -- 3. TransactionTime 查询优化索引
 CREATE INDEX idx_transaction_time ON dex_query_v1.t_smart_transaction (transaction_time);
+
+-- 4. 复合索引：优化按链ID、时间、Token查询（解决慢查询问题）
+-- 适用场景：WHERE chain_id = ? AND transaction_time BETWEEN ? AND ? AND token_address IN (...)
+CREATE INDEX IF NOT EXISTS idx_smart_transaction_chain_time_token 
+ON dex_query_v1.t_smart_transaction(chain_id, transaction_time DESC, token_address);
